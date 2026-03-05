@@ -1,34 +1,79 @@
-# Open Cowork: Complete Architecture & Implementation Specification
+# Open Cowork: Architecture & Implementation Specification
 
 ---
 
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
-2. [Design Philosophy](#design-philosophy)
-3. [Complete Architecture (10 Layers)](#complete-architecture)
-4. [MVP vs 1.0 Feature Split](#mvp-vs-10-feature-split)
-5. [Technical Decisions & Rationale](#technical-decisions--rationale)
-6. [Edge Cases & Solutions](#edge-cases--solutions)
-7. [Security Model](#security-model)
-8. [Future Enhancements](#future-enhancements)
+2. [Competitive Context](#competitive-context)
+3. [Design Philosophy](#design-philosophy)
+4. [Architecture Overview (6 Layers)](#architecture-overview)
+5. [Layer 1: Sandbox (Execution Environment)](#layer-1-sandbox)
+6. [Layer 2: Agent Core (LLM + Orchestration)](#layer-2-agent-core)
+7. [Layer 3: Tool Runtime (Bash + Browser + MCP)](#layer-3-tool-runtime)
+8. [Layer 4: Security Manager](#layer-4-security-manager)
+9. [Layer 5: Observability & TUI](#layer-5-observability--tui)
+10. [Layer 6: Session & Recovery](#layer-6-session--recovery)
+11. [Context Engineering Strategy](#context-engineering-strategy)
+12. [Feature Roadmap](#feature-roadmap)
+13. [Technical Decisions & Rationale](#technical-decisions--rationale)
+14. [Edge Cases & Solutions](#edge-cases--solutions)
+15. [Security Model](#security-model)
+16. [Known Limitations](#known-limitations)
 
 ---
 
 ## Executive Summary
 
-**Open Cowork** is a Linux-native, open-source alternative to Claude Cowork that provides an autonomous agent capable of:
-- Managing files and directories
-- Automating browser interactions
-- Executing multi-step workflows
-- Operating in a secure, sandboxed environment
+**Open Cowork** is a Linux-native, open-source alternative to [Claude Cowork](https://claude.com/blog/cowork-research-preview) — Anthropic's agentic desktop assistant (launched January 2026, macOS-only, $100-200/month).
 
-**Key Differentiators:**
-- **Provider Agnostic:** Works with any LLM (DeepSeek, Claude, GPT-4, Ollama)
-- **Linux Native:** Built for Linux primitives (no macOS dependency or windows, currently claude cowork only supports windows and macos, so we are basically filling the gap)
-- **Security First:** Containerized with explicit permissions
-- **Observable:** Real-time progress tracking and audit trails
-- **Recoverable:** Checkpoints and rollback capabilities
+Open Cowork provides an autonomous agent capable of:
+- Managing files and directories on the local filesystem
+- Automating browser interactions via Playwright
+- Connecting to external services via MCP (Model Context Protocol)
+- Executing multi-step workflows in a sandboxed environment
+
+### Why This Exists
+
+Claude Cowork is:
+- **macOS only** (Windows planned, no Linux support announced)
+- **Closed-source and proprietary** (locked to Claude models, $100-200/month)
+- **Cloud-dependent** (requires Anthropic subscription and connectivity)
+
+Open Cowork fills the gap:
+- **Linux native** — built for Linux desktop users and servers
+- **Provider agnostic** — works with any LLM via LiteLLM (DeepSeek, Claude, GPT-4, Ollama, local models)
+- **Self-hosted** — runs locally, no subscription required (bring your own API key)
+- **Open source** — MIT licensed, community-driven
+
+### Key Differentiators vs Claude Cowork
+
+| Feature | Claude Cowork | Open Cowork |
+|---|---|---|
+| Platform | macOS (Windows planned) | Linux |
+| LLM | Claude only | Any (75+ providers) |
+| Cost | $100-200/month | Free (BYO API key) |
+| Browser | Chrome extension (screenshot-based) | Playwright (DOM-first, faster) |
+| Extensibility | Connectors (Anthropic-reviewed) | MCP servers (open ecosystem) |
+| Sandboxing | VM isolation | gVisor / bubblewrap (configurable) |
+| Source | Closed | MIT open source |
+
+---
+
+## Competitive Context
+
+### Landscape (March 2026)
+
+| Project | Focus | Sandbox | LLM Support | Stars |
+|---|---|---|---|---|
+| **Claude Cowork** | Desktop automation (macOS) | VM isolation | Claude only | N/A (closed) |
+| **OpenHands** | Coding agent | Docker/E2B/Modal | Multi-provider | ~50K |
+| **OpenCode** | Terminal coding agent | Local (bubblewrap optional) | 75+ providers | ~108K |
+| **Browser-Use** | Web automation | None | Multi-provider | ~60K |
+| **Open Interpreter** | General computer use | Optional Docker | Multi-provider | ~55K |
+| **Open Cowork** | Desktop automation (Linux) | gVisor/bubblewrap | Multi-provider | — |
+
+**Positioning:** Claude Cowork's feature set (file management, browser automation, document generation, office workflows) for Linux, with any LLM, self-hosted, and open source. This is a knowledge-worker automation agent targeting Linux power users and developers.
 
 ---
 
@@ -36,841 +81,814 @@
 
 ### Core Principles
 
-1. **Hybrid Intelligence over Pure Planning**
-   - Use flexible task graphs for efficiency
-   - Fall back to ReAct loops for adaptability
-   - Never assume the world is deterministic
+1. **Ship, Then Architect**
+   - Working software over comprehensive documentation
+   - The MVP is < 3000 lines of Python
+   - Architecture evolves from implementation experience
 
-2. **Safety without Annoyance**
+2. **Safety Without Annoyance**
    - Auto-grant safe operations (read, copy, organize)
    - Confirm only high-risk operations (delete, encrypt, upload)
    - Use trash bins instead of permanent deletion
+   - Sandbox at the kernel level, not just application level
 
 3. **Observability is Non-Negotiable**
-   - Users must see what the agent is doing in real-time
+   - Users must see what the agent is doing in real-time via TUI
    - Every action must be auditable
    - Provide pause/resume/cancel controls
+   - Display running cost per session
 
-4. **Recovery over Rollback**
-   - Acknowledge that you can't undo reality (API calls, network requests)
-   - Use checkpoints for context, not time-travel
-   - Use trash bins for file recovery
-   - Use browser state storage for session recovery
+4. **DOM First, Vision as Fallback**
+   - Playwright for 90% of web tasks (faster, cheaper, more reliable)
+   - Vision models only when DOM fails (canvas elements, anti-automation sites)
+   - Direct DOM access avoids screenshot round-trip latency and vision model costs
 
-5. **DOM First, Vision as Fallback**
-   - Playwright for 80% of web tasks (faster, cheaper, more reliable)
-   - Vision models only when DOM fails (canvas elements, obscured UI)
+5. **Context is a Budget, Not a Dump**
+   - Every token sent to the LLM costs money and attention
+   - Tool results are truncated, not passed raw
+   - Conversation history is compacted with semantic preservation
+   - Structured state lives outside chat history
 
 ---
 
-## Complete Architecture
+## Architecture Overview
 
-### Layer 0: Foundation (Container Infrastructure)
+```
+┌─────────────────────────────────────────────────┐
+│                  User (TUI)                      │
+│            Layer 5: Observability & TUI          │
+├─────────────────────────────────────────────────┤
+│            Layer 6: Session & Recovery           │
+├─────────────────────────────────────────────────┤
+│            Layer 2: Agent Core                   │
+│         (LLM Provider + ReAct Loop)              │
+├─────────────────────────────────────────────────┤
+│            Layer 3: Tool Runtime                 │
+│      (Bash + Browser + MCP Servers)              │
+├─────────────────────────────────────────────────┤
+│            Layer 4: Security Manager             │
+│    (Permissions, Path Validation, Network)        │
+├─────────────────────────────────────────────────┤
+│            Layer 1: Sandbox                      │
+│      (gVisor / bubblewrap / Docker)              │
+└─────────────────────────────────────────────────┘
+```
 
-**Purpose:** Secure, resource-controlled execution environment
+**6 layers. No gaps.**
+
+- **Layer 1 (Sandbox):** Kernel-level isolation for untrusted code execution
+- **Layer 2 (Agent Core):** LLM provider abstraction + ReAct execution loop + cost tracking
+- **Layer 3 (Tool Runtime):** Bash REPL, Playwright browser, MCP tool servers
+- **Layer 4 (Security):** Permission model, path validation, network policy, MCP result sandboxing
+- **Layer 5 (Observability):** TUI interface, progress tracking, audit logging, cost display
+- **Layer 6 (Session):** Lifecycle management, checkpointing, graceful shutdown
+
+---
+
+## Layer 1: Sandbox
+
+**Purpose:** Kernel-level isolation for executing untrusted LLM-generated code.
+
+### Why Not Just Docker?
+
+Docker containers share the host kernel. LLM-generated code is unpredictable and cannot be audited ahead of execution. CVE-2019-5736 demonstrated container escape is real. The 2026 industry consensus: containers alone are insufficient for agent sandboxing.
+
+### Sandbox Tiers
 
 ```yaml
-Container Specification:
-  Base Images (Layered):
-    - opencowork:base (500MB)
-      └─ Python 3.11 + Playwright + Bash essentials
-    
-    - opencowork:data-science (1.2GB)
-      └─ base + pandas + numpy + scipy + matplotlib
-    
-    - opencowork:web-scraping (800MB)
-      └─ base + selenium + beautifulsoup + requests
-    
-    - opencowork:media (1.5GB)
-      └─ base + PIL + opencv + ffmpeg
-  
-  Security:
-    - userns-remap: enabled (container root ≠ host root)
-    - User mapping: Run as host UID/GID
-    - No /etc/passwd mounting (security leak)
-  
-  Resources:
-    - CPU limit: 2.0 cores
-    - Memory limit: 4GB
-    - PID limit: 256 processes
-    - Disk: tmpfs for /tmp (auto-cleanup)
-  
-  Network:
-    - Mode: bridge (isolated by default)
-    - Allowlist: pypi.org, github.com, google.com
-    - Firewall: Strict domain filtering
-  
-  Volumes:
-    - /workspace (explicit user opt-in)
-    - ~/.cowork/trash (safety net)
-    - ~/.cowork/cache (model storage)
-    - ~/.cowork/checkpoints (state storage)
-  
-  Health Monitoring:
-    - CPU threshold: 90% sustained = unhealthy
-    - Memory threshold: 3.5GB = restart warning
-    - Heartbeat: Every 30s
-    - Auto-restart: On resource exhaustion
+Tier 1 — bubblewrap (zero dependencies):
+  Description: Linux namespace isolation without Docker daemon
+  Startup: <10ms
+  Security: Namespace isolation (mount, PID, network, user)
+  Use case: Default for local development / single-user
+  Trade-off: No cgroup resource limits (use ulimit instead)
+
+Tier 2 — gVisor (recommended production):
+  Description: User-space kernel that intercepts syscalls
+  Startup: ~50ms (via runsc OCI runtime)
+  Security: Dramatically reduced kernel attack surface
+  Use case: Production, multi-user, untrusted workloads
+  Trade-off: Some syscall incompatibilities (rare for Python/Node)
+
+Tier 3 — Docker with gVisor runtime (enterprise):
+  Description: Full container orchestration with gVisor isolation
+  Startup: ~200ms
+  Security: gVisor + cgroups + namespace isolation
+  Use case: Enterprise with existing Docker infrastructure
+  Trade-off: Requires Docker daemon, heavier setup
+
+Tier 4 — Firecracker microVM (maximum security):
+  Description: Hardware-level isolation via KVM
+  Startup: ~125ms
+  Security: Separate kernel per session, VM-level isolation
+  Use case: Multi-tenant SaaS, compliance-critical
+  Trade-off: Requires KVM support, more operational complexity
 ```
 
-**Container Selection Logic:**
-```python
-class SmartContainer:
-    def select_image(self, prompt: str) -> str:
-        """Detect required packages and use pre-built image"""
-        if any(pkg in prompt.lower() for pkg in ['pandas', 'numpy', 'csv']):
-            return 'opencowork:data-science'
-        elif any(pkg in prompt.lower() for pkg in ['scrape', 'crawl', 'selenium']):
-            return 'opencowork:web-scraping'
-        elif any(pkg in prompt.lower() for pkg in ['image', 'video', 'photo']):
-            return 'opencowork:media'
-        else:
-            return 'opencowork:base'
-    
-    def runtime_install(self, package: str):
-        """Install package and cache the layer"""
-        subprocess.run(['pip', 'install', package, '--break-system-packages'])
-        new_layer = self.commit_container()
-        self.cache_layer(package, new_layer)
-```
-
----
-
-### Layer 0.5: Session Coordinator
-
-**Purpose:** Prevent concurrent file access conflicts
+### bubblewrap Implementation
 
 ```python
-class SessionCoordinator:
-    """Manages multiple concurrent sessions"""
-    
-    def __init__(self):
-        self.active_sessions: Dict[str, Session] = {}
-        self.file_locks: Dict[Path, str] = {}  # Path -> Session ID
-        self.lock_timeout = 300  # 5 minutes
-    
-    def request_access(self, session_id: str, path: Path, mode: str) -> bool:
-        """
-        Args:
-            session_id: Unique session identifier
-            path: File/directory path to access
-            mode: 'read' or 'write'
-        
-        Returns:
-            True if access granted, False if conflict
-        """
-        if mode == 'read':
-            # Multiple readers allowed
-            return True
-        
-        if mode == 'write':
-            # Check for existing lock
-            if path in self.file_locks:
-                lock_holder = self.file_locks[path]
-                lock_age = time.time() - self.active_sessions[lock_holder].lock_time
-                
-                # Stale lock (session died?)
-                if lock_age > self.lock_timeout:
-                    self.release_lock(path)
-                else:
-                    # Active conflict
-                    return self._resolve_conflict(session_id, lock_holder, path)
-            
-            # Acquire lock
-            self.file_locks[path] = session_id
-            self.active_sessions[session_id].lock_time = time.time()
-            return True
-    
-    def _resolve_conflict(self, new_session: str, existing_session: str, path: Path) -> bool:
-        """Ask user to resolve conflict"""
-        choice = user_prompt(f"""
-        Session {existing_session} is currently working on {path}.
-        
-        Options:
-        1. Wait for completion
-        2. Take over (cancels other session)
-        3. Work on different folder
-        """)
-        
-        if choice == 1:
-            # Block until lock released
-            while path in self.file_locks:
-                time.sleep(1)
-            return self.request_access(new_session, path, 'write')
-        
-        elif choice == 2:
-            # Force-cancel existing session
-            self.cancel_session(existing_session)
-            self.file_locks[path] = new_session
-            return True
-        
-        else:
-            return False
-    
-    def release_lock(self, path: Path):
-        """Release file lock when operation completes"""
-        if path in self.file_locks:
-            del self.file_locks[path]
-```
+import subprocess
+import os
+from pathlib import Path
 
----
 
-### Layer 1: The Brain (LLM Provider)
+class BubblewrapSandbox:
+    """
+    Lightweight Linux namespace sandbox using bubblewrap (bwrap).
+    No Docker daemon required. Installed via: apt install bubblewrap
 
-**Purpose:** Provider-agnostic LLM interface with failover
+    Mount strategy: explicit allowlist of system paths.
+    Only /usr, /bin, /sbin, /lib, /lib64, and minimal /etc are exposed read-only.
+    /proc and /dev are mounted as minimal isolated filesystems.
+    The host root is never bind-mounted wholesale.
+    """
 
-```python
-class ModelRegistry:
-    """Manages multiple LLM providers with A/B testing and fallbacks"""
-    
-    def __init__(self):
-        self.models = {
-            'fast': [
-                ('deepseek-v4', 1.0),           # Primary (100% traffic)
-                ('deepseek-v3', 0.0),           # Backup (0% traffic)
-            ],
-            'smart': [
-                ('claude-sonnet-4.5', 0.8),     # Primary (80% traffic)
-                ('claude-sonnet-4', 0.2),       # Canary (20% traffic)
-            ],
-            'vision': [
-                ('qwen-vl-2', 0.7),             # Primary
-                ('gpt-4o', 0.3),                # Fallback
-            ]
-        }
-        self.cache_dir = Path.home() / '.cowork' / 'models'
-        self.failure_counts = defaultdict(int)
-    
-    def get_model(self, category: str, session_id: str = None) -> str:
-        """
-        Returns model name using weighted selection
-        Implements circuit breaker for failed models
-        """
-        candidates = self.models[category]
-        
-        # Filter out failed models (circuit breaker)
-        available = [(m, w) for m, w in candidates 
-                     if self.failure_counts[m] < 3]
-        
-        if not available:
-            # All models failed, use cache
-            return self.get_cached_model(category)
-        
-        # Weighted random selection (for A/B testing)
-        total_weight = sum(w for _, w in available)
-        r = random.random() * total_weight
-        
-        cumulative = 0
-        for model, weight in available:
-            cumulative += weight
-            if r <= cumulative:
-                try:
-                    self.test_model(model)
-                    return model
-                except ModelUnavailable:
-                    self.failure_counts[model] += 1
-                    continue
-        
-        # All attempts failed
-        return self.get_cached_model(category)
-    
-    def get_cached_model(self, category: str) -> str:
-        """Use locally cached model when APIs unavailable"""
-        cache_path = self.cache_dir / category
-        if cache_path.exists():
-            return f"local:{cache_path}"
-        raise NoAvailableModel(f"No cache for {category}")
-    
-    def record_success(self, model: str):
-        """Reset failure counter on successful call"""
-        self.failure_counts[model] = 0
-    
-    def record_failure(self, model: str):
-        """Increment failure counter (circuit breaker)"""
-        self.failure_counts[model] += 1
+    # System paths to expose read-only inside the sandbox
+    SYSTEM_RO_PATHS = ['/usr', '/bin', '/sbin', '/lib', '/lib64']
 
-class LLMProvider:
-    """Main interface to LiteLLM proxy"""
-    
-    def __init__(self):
-        self.proxy_url = os.getenv('LITELLM_URL', 'http://localhost:4000')
-        self.registry = ModelRegistry()
-        self.request_timeout = 60
-    
-    def completion(self, messages: List[Dict], category: str = 'fast', 
-                   tools: List[Dict] = None, stream: bool = False) -> Dict:
-        """
-        Call LLM with automatic model selection and failover
-        
-        Args:
-            messages: Chat messages in OpenAI format
-            category: 'fast', 'smart', or 'vision'
-            tools: Optional tool definitions for function calling
-            stream: Whether to stream response
-        
-        Returns:
-            Response dict with choices, usage, etc.
-        """
-        model = self.registry.get_model(category)
-        
-        payload = {
-            'model': model,
-            'messages': messages,
-            'tools': tools,
-            'stream': stream
-        }
-        
+    # Minimal /etc entries for DNS resolution and TLS
+    ETC_RO_PATHS = [
+        '/etc/resolv.conf',
+        '/etc/ssl',
+        '/etc/ca-certificates',
+        '/etc/ld.so.cache',
+        '/etc/ld.so.conf',
+        '/etc/ld.so.conf.d',
+        '/etc/alternatives',
+    ]
+
+    def __init__(self, workspace: Path, config: dict = None):
+        self.workspace = workspace.resolve()
+        self.trash_dir = Path.home() / '.cowork' / 'trash'
+        self.trash_dir.mkdir(parents=True, exist_ok=True)
+        self.config = config or {}
+
+    def execute(self, command: list[str], timeout: int = 30) -> dict:
+        bwrap_cmd = self._build_bwrap_command(command)
+
         try:
-            response = requests.post(
-                f"{self.proxy_url}/chat/completions",
-                json=payload,
-                timeout=self.request_timeout
+            result = subprocess.run(
+                bwrap_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                shell=False,
             )
-            response.raise_for_status()
-            
-            self.registry.record_success(model)
-            return response.json()
-        
-        except (RequestException, HTTPError) as e:
-            self.registry.record_failure(model)
-            
-            # Retry with fallback model
-            fallback_model = self.registry.get_model(category)
-            if fallback_model != model:
-                payload['model'] = fallback_model
-                response = requests.post(
-                    f"{self.proxy_url}/chat/completions",
-                    json=payload,
-                    timeout=self.request_timeout
-                )
-                return response.json()
-            
-            raise LLMProviderError(f"All models failed for {category}") from e
-```
-
----
-
-### Layer 2: The Orchestrator (Hybrid Planning + ReAct)
-
-**Purpose:** Intelligent task execution with planning and adaptation
-
-```python
-class ContextManager:
-    """Shared state between tools and steps"""
-    
-    def __init__(self):
-        self.state = {
-            'files_created': [],
-            'files_modified': [],
-            'files_deleted': [],
-            'current_url': None,
-            'browser_cookies': None,
-            'last_error': None,
-            'clipboard': None,
-            'environment_vars': {},
-        }
-        self.history: List[Dict] = []
-    
-    def update(self, key: str, value: Any):
-        """Update context state and log change"""
-        old_value = self.state.get(key)
-        self.state[key] = value
-        
-        self.history.append({
-            'timestamp': time.time(),
-            'action': 'context_update',
-            'key': key,
-            'old_value': old_value,
-            'new_value': value
-        })
-    
-    def get(self, key: str, default=None):
-        return self.state.get(key, default)
-    
-    def serialize(self) -> str:
-        """Serialize context for LLM consumption"""
-        return json.dumps(self.state, indent=2)
-
-class TaskGraph:
-    """Flexible task graph with conditional branching"""
-    
-    def __init__(self, steps: List[Dict]):
-        self.steps = steps
-        self.current_step = 0
-        self.completed = []
-        self.failed = []
-    
-    def next_step(self) -> Optional[Dict]:
-        """Get next step considering conditionals"""
-        if self.current_step >= len(self.steps):
-            return None
-        
-        step = self.steps[self.current_step]
-        self.current_step += 1
-        return step
-    
-    def adapt_step(self, step: Dict, result: Any) -> Dict:
-        """
-        Modify step based on result (handle .zip vs .pdf case)
-        
-        Example:
-            step = {'action': 'extract', 'expect': ['pdf', 'zip']}
-            result = {'type': 'zip', 'path': '/tmp/file.zip'}
-            → Returns: {'action': 'unzip', 'target': '/tmp/file.zip'}
-        """
-        if 'expect' in step and 'next_if' in step:
-            result_type = result.get('type')
-            if result_type in step['expect']:
-                fallback_key = f"next_if_{result_type}"
-                if fallback_key in step:
-                    return step[fallback_key]
-        
-        return step
-    
-    def insert_steps(self, new_steps: List[Dict], after_current: bool = True):
-        """Insert steps dynamically (for error recovery)"""
-        insert_pos = self.current_step if after_current else self.current_step - 1
-        self.steps = self.steps[:insert_pos] + new_steps + self.steps[insert_pos:]
-
-class HybridOrchestrator:
-    """
-    Main orchestration engine
-    Combines:
-      - Upfront planning (task graph)
-      - ReAct execution (adaptation)
-      - Context management (shared state)
-    """
-    
-    def __init__(self):
-        self.llm = LLMProvider()
-        self.context = ContextManager()
-        self.tools = ToolRegistry(self.context)
-        self.progress = ProgressTracker()
-        self.session_id = generate_session_id()
-    
-    def execute_task(self, user_prompt: str, max_turns: int = 20) -> Dict:
-        """
-        Main execution loop
-        
-        Flow:
-          1. Generate flexible plan (task graph)
-          2. Execute steps with ReAct adaptation
-          3. Handle errors with re-planning
-          4. Return final result
-        """
-        print(f"Starting task: {user_prompt}")
-        
-        # Phase 1: Planning (One LLM call)
-        plan = self._generate_plan(user_prompt)
-        task_graph = TaskGraph(plan['steps'])
-        
-        messages = [
-            {
-                'role': 'system',
-                'content': self._get_system_prompt()
-            },
-            {
-                'role': 'user',
-                'content': user_prompt
+            return {
+                'stdout': result.stdout,
+                'stderr': result.stderr,
+                'exit_code': result.returncode,
             }
-        ]
-        
-        # Phase 2: Execution (ReAct Loop)
-        for turn in range(max_turns):
-            # Get next step from graph
-            step = task_graph.next_step()
-            
-            if step is None:
-                print("Task completed (all steps done)")
-                break
-            
-            # Execute step
-            try:
-                result = self._execute_step(step, messages) # another LLM call
-                
-                # Check if we need to adapt the next step
-                if result.get('needs_adaptation'):
-                    adapted_step = task_graph.adapt_step(step, result)
-                    task_graph.insert_steps([adapted_step])
-                
-                # Continue to next step
-                continue
-            
-            except UnexpectedError as e:
-                # Step failed unexpectedly - replan
-                print(f"Unexpected error: {e}")
-                
-                # Ask LLM to replan from this point (one more LLM call on failure)
-                new_plan = self._replan(step, e, messages)
-                task_graph.insert_steps(new_plan['steps'])
-        
-        return {
-            'status': 'completed' if step is None else 'max_turns',
-            'context': self.context.state,
-            'history': self.context.history
-        }
-    
-    def _generate_plan(self, prompt: str) -> Dict:
-        """
-        Generate flexible task graph upfront
-        Uses 'smart' model for better planning
-        """
-        planning_prompt = f"""
-        Create a flexible task graph for: {prompt}
-        
-        Return JSON with format:
-        {{
-          "steps": [
-            {{
-              "action": "download",
-              "tool": "browser",
-              "expect": ["pdf", "zip"],
-              "next_if_zip": {{"action": "unzip", "tool": "bash"}}
-            }}
-          ]
-        }}
-        
-        Include conditional branches for expected variations.
-        """
-        
-        response = self.llm.completion(
-            messages=[{'role': 'user', 'content': planning_prompt}],
-            category='smart'
-        )
-        
-        content = response['choices'][0]['message']['content']
-        # Parse JSON from response (may need cleanup)
-        plan = json.loads(self._extract_json(content))
-        return plan
-    
-    def _execute_step(self, step: Dict, messages: List[Dict]) -> Dict:
-        """
-        Execute a single step using native tool calling
-        
-        This is where the ReAct loop happens - the LLM sees
-        the step, decides which tool to use, and we execute it
-        """
-        # Add step to conversation
-        messages.append({
-            'role': 'user',
-            'content': f"Execute this step: {json.dumps(step)}\nContext: {self.context.serialize()}"
-        })
-        
-        # Call LLM with tool definitions
-        response = self.llm.completion(
-            messages=messages,
-            category='fast',
-            tools=self.tools.get_definitions()
-        )
-        
-        msg = response['choices'][0]['message']
-        messages.append(msg)
-        
-        # Execute tool calls
-        if msg.get('tool_calls'):
-            for tool_call in msg['tool_calls']:
-                func_name = tool_call['function']['name']
-                args = json.loads(tool_call['function']['arguments'])
-                
-                print(f"    {func_name}({args})")
-                
-                # Execute via tool registry
-                result = self.tools.execute(func_name, **args)
-                
-                # Add result to conversation
-                messages.append({
-                    'role': 'tool',
-                    'tool_call_id': tool_call['id'],
-                    'content': str(result)
-                })
-                
-                return result
-        
-        # No tool call - LLM wants to talk to user
-        return {'type': 'message', 'content': msg.get('content')}
-    
-    def _replan(self, failed_step: Dict, error: Exception, messages: List[Dict]) -> Dict:
-        """
-        Ask LLM to generate new plan when unexpected failure occurs
-        """
-        replan_prompt = f"""
-        The following step failed:
-        {json.dumps(failed_step)}
-        
-        Error: {str(error)}
-        
-        Current context: {self.context.serialize()}
-        
-        Generate a recovery plan (new steps to try).
-        """
-        
-        response = self.llm.completion(
-            messages=messages + [{'role': 'user', 'content': replan_prompt}],
-            category='smart'
-        )
-        
-        content = response['choices'][0]['message']['content']
-        return json.loads(self._extract_json(content))
-    
-    def _get_system_prompt(self) -> str:
-        return """You are Open Cowork, a Linux automation agent.
-        
-        You have access to:
-        - bash: Execute shell commands, manage files
-        - browser: Navigate web pages, fill forms, click buttons
-        - vision: Analyze screenshots when DOM automation fails
-        
-        Strategy:
-        1. Break tasks into steps
-        2. Use bash for file operations (faster, more reliable)
-        3. Use browser (Playwright) for web tasks
-        4. Only use vision when DOM elements are inaccessible
-        5. When a step fails, analyze the error and adapt
-        
-        Safety rules:
-        - Never use 'rm' directly (use trash)
-        - Confirm before destructive operations on user files
-        - All operations are scoped to /workspace
-        """
-    
-    @staticmethod
-    def _extract_json(text: str) -> str:
-        """Extract JSON from markdown code blocks"""
-        if '```json' in text:
-            return text.split('```json')[1].split('```')[0].strip()
-        elif '```' in text:
-            return text.split('```')[1].split('```')[0].strip()
-        return text.strip()
-```
+        except subprocess.TimeoutExpired:
+            return {
+                'stdout': '',
+                'stderr': f'Command timed out after {timeout}s',
+                'exit_code': -1,
+            }
+        except FileNotFoundError:
+            return {
+                'stdout': '',
+                'stderr': 'bubblewrap (bwrap) not found. Install: apt install bubblewrap',
+                'exit_code': -1,
+            }
 
----
+    def _build_bwrap_command(self, command: list[str]) -> list[str]:
+        bwrap = ['bwrap']
 
-### Layer 3: Session Manager (Runtime Lifecycle)
+        # Read-only system paths (explicit allowlist, never full root)
+        for sys_path in self.SYSTEM_RO_PATHS:
+            if os.path.exists(sys_path):
+                bwrap.extend(['--ro-bind', sys_path, sys_path])
 
-**Purpose:** Manage session lifecycle, resources, and health
+        # Minimal /etc entries (DNS, TLS, dynamic linker)
+        for etc_path in self.ETC_RO_PATHS:
+            if os.path.exists(etc_path):
+                bwrap.extend(['--ro-bind', etc_path, etc_path])
 
-```python
-class SessionManager:
+        # Writable workspace and trash
+        bwrap.extend([
+            '--bind', str(self.workspace), '/workspace',
+            '--bind', str(self.trash_dir), '/trash',
+        ])
+
+        # Isolated tmpfs for sensitive paths
+        bwrap.extend([
+            '--tmpfs', '/tmp',
+            '--tmpfs', '/home',
+            '--tmpfs', '/run',
+        ])
+
+        # Minimal /proc and /dev (not the host's real /proc or /dev)
+        bwrap.extend([
+            '--proc', '/proc',
+            '--dev', '/dev',
+        ])
+
+        # Namespace isolation
+        bwrap.extend([
+            '--unshare-pid',
+            '--unshare-uts',
+            '--die-with-parent',
+            '--chdir', '/workspace',
+        ])
+
+        # Network isolation is the default; allow only when explicitly configured
+        if not self.config.get('allow_network', False):
+            bwrap.append('--unshare-net')
+
+        bwrap.extend(['--'] + command)
+        return bwrap
+
+
+class GVisorSandbox:
     """
-    Manages Docker container sessions
-    Monitors resources, handles timeouts, enables resumption
+    gVisor-based sandbox using Docker with runsc runtime.
+    Requires: docker + gVisor runsc runtime installed.
     """
-    
-    def __init__(self):
-        self.sessions: Dict[str, SessionState] = {}
-        self.idle_timeout = 30 * 60  # 30 minutes
-        self.max_session_time = 4 * 3600  # 4 hours
-        self.resource_check_interval = 30  # seconds
-        
-    def create_session(self, user_id: str, workspace: Path) -> str:
-        """
-        Spin up a new Docker container for this session
-        
-        Returns:
-            session_id
-        """
-        session_id = f"{user_id}_{int(time.time())}"
-        
-        # Create container
-        container = docker_client.containers.run(
-            image=self._select_image(),
-            user=f"{os.getuid()}:{os.getgid()}",
+
+    def __init__(self, workspace: Path, image: str = 'opencowork:base'):
+        self.workspace = workspace.resolve()
+        self.image = image
+
+    async def create_container(self) -> str:
+        import docker
+        client = docker.from_env()
+
+        container = client.containers.run(
+            image=self.image,
+            runtime='runsc',
+            user=f'{os.getuid()}:{os.getgid()}',
             volumes={
-                str(workspace): {'bind': '/workspace', 'mode': 'rw'},
-                str(Path.home() / '.cowork' / 'trash'): {'bind': '/home/agent/.cowork/trash', 'mode': 'rw'},
+                str(self.workspace): {'bind': '/workspace', 'mode': 'rw'},
             },
             environment={
-                'LITELLM_URL': 'http://litellm:4000',
-                'SESSION_ID': session_id
+                'WORKSPACE': '/workspace',
             },
-            network_mode='bridge',
+            network_mode='none',
             detach=True,
             mem_limit='4g',
             cpu_count=2,
-            pids_limit=256
+            pids_limit=256,
+            security_opt=['no-new-privileges'],
+            read_only=True,
+            tmpfs={'/tmp': 'size=512m'},
         )
-        
-        state = SessionState(
-            session_id=session_id,
-            container_id=container.id,
-            created_at=time.time(),
-            last_activity=time.time(),
-            workspace=workspace,
-            status='active'
-        )
-        
-        self.sessions[session_id] = state
-        
-        # Start monitoring thread
-        threading.Thread(target=self._monitor_session, args=(session_id,), daemon=True).start()
-        
-        return session_id
-    
-    def _monitor_session(self, session_id: str):
-        """Background thread to monitor session health"""
-        while session_id in self.sessions:
-            state = self.sessions[session_id]
-            
-            # Check idle timeout
-            idle_time = time.time() - state.last_activity
-            if idle_time > self.idle_timeout:
-                print(f"    Session {session_id} idle for {idle_time:.0f}s, terminating...")
-                self.terminate_session(session_id, reason='idle_timeout')
-                break
-            
-            # Check max session time
-            total_time = time.time() - state.created_at
-            if total_time > self.max_session_time:
-                print(f"    Session {session_id} exceeded max time ({total_time:.0f}s), terminating...")
-                self.terminate_session(session_id, reason='max_time')
-                break
-            
-            # Check resource usage
-            container = docker_client.containers.get(state.container_id)
-            stats = container.stats(stream=False)
-            
-            memory_usage = stats['memory_stats']['usage']
-            memory_limit = stats['memory_stats']['limit']
-            memory_percent = (memory_usage / memory_limit) * 100
-            
-            if memory_percent > 95:
-                print(f"    Warning: Session {session_id} memory critical ({memory_percent:.1f}%), restarting...")
-                self.restart_session(session_id, preserve_state=True)
-            
-            time.sleep(self.resource_check_interval)
-    
-    def heartbeat(self, session_id: str):
-        """Update last activity timestamp"""
-        if session_id in self.sessions:
-            self.sessions[session_id].last_activity = time.time()
-    
-    def terminate_session(self, session_id: str, reason: str = 'user_request'):
-        """Clean shutdown of session"""
-        if session_id not in self.sessions:
-            return
-        
-        state = self.sessions[session_id]
-        
-        # Save state to disk for potential resume
-        self._save_session_state(session_id)
-        
-        # Stop and remove container
-        container = docker_client.containers.get(state.container_id)
-        container.stop(timeout=10)
-        container.remove()
-        
-        # Update state
-        state.status = 'terminated'
-        state.end_reason = reason
-        
-        # Log termination
-        print(f"    Warning: Session {session_id} terminated: {reason}")
-    
-    def restart_session(self, session_id: str, preserve_state: bool = True):
-        """
-        Restart container (for resource exhaustion)
-        Optionally preserve state
-        """
-        if preserve_state:
-            checkpoint = self._save_session_state(session_id)
-        
-        # Kill old container
-        old_state = self.sessions[session_id]
-        old_container = docker_client.containers.get(old_state.container_id)
-        old_container.kill()
-        old_container.remove()
-        
-        # Start new container
-        new_session = self.create_session(old_state.user_id, old_state.workspace)
-        
-        if preserve_state:
-            self._restore_session_state(new_session, checkpoint)
-        
-        return new_session
-    
-    def _save_session_state(self, session_id: str) -> Dict:
-        """Serialize session state to disk"""
-        state = self.sessions[session_id]
-        checkpoint = {
-            'session_id': session_id,
-            'context': state.context.state if hasattr(state, 'context') else {},
-            'history': state.context.history if hasattr(state, 'context') else [],
-            'timestamp': time.time()
-        }
-        
-        checkpoint_path = Path.home() / '.cowork' / 'checkpoints' / f"{session_id}.json"
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        checkpoint_path.write_text(json.dumps(checkpoint, indent=2))
-        
-        return checkpoint
-    
-    def _restore_session_state(self, session_id: str, checkpoint: Dict):
-        """Restore session state from checkpoint"""
-        state = self.sessions[session_id]
-        state.context = ContextManager()
-        state.context.state = checkpoint['context']
-        state.context.history = checkpoint['history']
+        return container.id
+
+    async def execute(self, container_id: str, command: list[str], timeout: int = 30) -> dict:
+        import docker
+        client = docker.from_env()
+        container = client.containers.get(container_id)
+
+        try:
+            exit_code, output = container.exec_run(
+                cmd=command,
+                workdir='/workspace',
+                demux=True,
+            )
+            stdout = output[0].decode() if output[0] else ''
+            stderr = output[1].decode() if output[1] else ''
+            return {'stdout': stdout, 'stderr': stderr, 'exit_code': exit_code}
+        except Exception as e:
+            return {'stdout': '', 'stderr': str(e), 'exit_code': -1}
+```
+
+### Container Image (Docker/gVisor Tiers Only)
+
+A single well-equipped base image for tiers that use Docker:
+
+```dockerfile
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl wget jq ripgrep tree file unzip \
+    libreoffice-calc libreoffice-writer \
+    ghostscript imagemagick \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install playwright && playwright install chromium --with-deps
+
+RUN pip install --no-cache-dir \
+    pandas numpy openpyxl python-docx \
+    beautifulsoup4 requests httpx \
+    Pillow pdf2image pymupdf \
+    litellm mcp
+
+COPY agent/ /opt/agent/
+WORKDIR /workspace
+
+RUN useradd -m -u 1000 agent
+USER agent
+```
+
+**Size:** ~1.5GB (acceptable — OpenHands is ~10GB).
+Pre-install common packages. If a rare package is needed, `pip install` at runtime with user confirmation.
+
+For the bubblewrap tier (no Docker), the agent runs host-installed tools inside namespace isolation. Required host packages: `python3`, `bwrap`, `git`. Optional: `playwright`, MCP server binaries.
+
+---
+
+## Layer 2: Agent Core
+
+**Purpose:** LLM provider abstraction, execution loop, and cost tracking.
+
+### LLM Provider
+
+```python
+import litellm
+import asyncio
+import random
+from dataclasses import dataclass, field
+
 
 @dataclass
-class SessionState:
-    session_id: str
-    container_id: str
-    created_at: float
-    last_activity: float
-    workspace: Path
-    status: str  # 'active', 'paused', 'terminated'
-    context: Optional[ContextManager] = None
-    end_reason: Optional[str] = None
+class ModelConfig:
+    primary: str = 'deepseek/deepseek-chat'
+    fallback: str = 'anthropic/claude-sonnet-4'
+    vision: str = 'anthropic/claude-sonnet-4'
+    max_retries: int = 2
+    timeout: int = 60
+    max_cost_per_session_usd: float = 5.0
+
+
+class LLMProviderError(Exception):
+    pass
+
+
+class LLMProvider:
+    """
+    Provider-agnostic LLM interface via litellm (used as library, not proxy server).
+    """
+
+    def __init__(self, config: ModelConfig = None):
+        self.config = config or ModelConfig()
+
+    async def completion(
+        self,
+        messages: list[dict],
+        model: str = None,
+        tools: list[dict] = None,
+        stream: bool = False,
+    ) -> dict:
+        model = model or self.config.primary
+
+        for attempt in range(self.config.max_retries + 1):
+            current_model = model if attempt == 0 else self.config.fallback
+            try:
+                response = await litellm.acompletion(
+                    model=current_model,
+                    messages=messages,
+                    tools=tools,
+                    stream=stream,
+                    timeout=self.config.timeout,
+                )
+                return response
+            except litellm.RateLimitError:
+                # Respect rate limits with exponential backoff + jitter
+                wait = (2 ** attempt) + random.uniform(0, 1)
+                await asyncio.sleep(wait)
+                continue
+            except litellm.AuthenticationError as e:
+                # Do not retry auth failures
+                raise LLMProviderError(f'Authentication failed for {current_model}: {e}') from e
+            except Exception as e:
+                if attempt == self.config.max_retries:
+                    raise LLMProviderError(f'All models failed: {e}') from e
+                # Exponential backoff for transient errors
+                wait = (2 ** attempt) + random.uniform(0, 1)
+                await asyncio.sleep(wait)
+                continue
+```
+
+### Cost Tracker
+
+```python
+@dataclass
+class CostTracker:
+    max_cost_usd: float = 5.0
+    session_cost_usd: float = 0.0
+    calls: list[dict] = field(default_factory=list)
+
+    def record(self, response):
+        """Record cost from an LLM response using litellm's cost calculator."""
+        try:
+            cost = litellm.completion_cost(completion_response=response)
+        except Exception:
+            cost = 0.0
+        self.session_cost_usd += cost
+        self.calls.append({
+            'model': getattr(response, 'model', 'unknown'),
+            'cost_usd': cost,
+            'tokens': response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0,
+        })
+
+    def exceeds_limit(self) -> bool:
+        return self.session_cost_usd >= self.max_cost_usd
+```
+
+### Agent Loop (ReAct Pattern)
+
+The core execution pattern is ReAct (Reason + Act). The LLM receives context, decides what tool to call, observes the result, and repeats until the task is done.
+
+This is simpler and more reliable than plan-and-execute for the majority of tasks. The LLM does not need to predict the entire execution path upfront — it adapts to each result as it arrives.
+
+```python
+import json
+
+
+class AgentLoop:
+    """
+    ReAct execution loop.
+
+    Flow per turn:
+      1. Send messages + tool definitions to LLM
+      2. If LLM returns tool calls, execute ALL of them
+      3. Append results to message history
+      4. If context is growing large, compact older messages
+      5. Repeat until LLM produces a text response (task complete) or limits hit
+    """
+
+    def __init__(
+        self,
+        llm: LLMProvider,
+        tools: 'ToolRuntime',
+        security: 'SecurityManager',
+        event_bus: 'EventBus',
+        context: 'ContextState',
+        message_manager: 'MessageManager',
+        cost_tracker: CostTracker,
+    ):
+        self.llm = llm
+        self.tools = tools
+        self.security = security
+        self.event_bus = event_bus
+        self.context = context
+        self.message_manager = message_manager
+        self.cost_tracker = cost_tracker
+
+    async def execute_task(self, user_prompt: str, max_turns: int = 25) -> dict:
+        self.message_manager.add_user_message(user_prompt)
+
+        turn = 0
+        for turn in range(max_turns):
+            messages = self.message_manager.get_messages()
+
+            response = await self.llm.completion(
+                messages=messages,
+                tools=self.tools.get_definitions(),
+            )
+
+            self.cost_tracker.record(response)
+            msg = response.choices[0].message
+            self.message_manager.add_assistant_message(msg)
+
+            if not msg.tool_calls:
+                break
+
+            # Process ALL tool calls in the response (LLMs emit parallel calls)
+            for tool_call in msg.tool_calls:
+                func_name = tool_call.function.name
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    self.message_manager.add_tool_result(
+                        tool_call_id=tool_call.id,
+                        result={'error': 'Malformed tool call arguments'},
+                    )
+                    continue
+
+                if not await self.security.check_permission(func_name, args):
+                    result = {'error': 'Permission denied by user'}
+                else:
+                    result = await self.tools.execute(func_name, **args)
+
+                self.context.update_from_result(func_name, args, result)
+                await self.event_bus.emit_action(func_name, str(args)[:200], str(result)[:200])
+
+                self.message_manager.add_tool_result(
+                    tool_call_id=tool_call.id,
+                    result=result,
+                )
+
+            # Check cost limit
+            if self.cost_tracker.exceeds_limit():
+                await self.event_bus.emit('cost_limit', {
+                    'spent': self.cost_tracker.session_cost_usd,
+                    'limit': self.cost_tracker.max_cost_usd,
+                })
+                break
+
+        return {
+            'status': 'completed',
+            'cost_usd': self.cost_tracker.session_cost_usd,
+            'turns': turn + 1,
+            'context': self.context.summary(),
+        }
+
+
+SYSTEM_PROMPT = """You are Open Cowork, an autonomous Linux agent.
+You help users accomplish tasks by executing commands, browsing the web, and connecting to external services.
+
+Available tools:
+- run_bash: Execute shell commands in a sandboxed workspace (/workspace)
+- browser_goto: Navigate to a URL
+- browser_click: Click an element (CSS selector)
+- browser_type: Type into an input field
+- browser_read: Extract text from a page or element
+- mcp_call: Call a connected MCP tool server
+
+Rules:
+- All file operations are scoped to /workspace
+- Use trash (mv to /trash) instead of rm for deletions
+- Confirm destructive operations with the user
+- Read files prior to modifying them
+- Verify results after multi-step operations
+
+When working:
+1. State what you're about to do
+2. Execute the action
+3. Check the result
+4. Continue or adjust based on output"""
+```
+
+### Plan-and-Execute (Optimization Layer)
+
+For batch-style tasks where the full execution path is predictable (e.g., "rename all .jpeg files to .jpg"), a plan-and-execute layer can reduce LLM calls by generating the plan upfront and executing steps directly.
+
+This is an optimization on top of the ReAct loop, not a replacement. It is appropriate when:
+- The task is decomposable into concrete tool calls at planning time
+- Steps do not depend on dynamic content (web pages, API responses)
+- The user requests a predictable, reviewable plan
+
+```python
+class PlanAndExecute:
+    """
+    Optional optimization layer. Generates a plan via structured output,
+    then executes deterministic steps without calling the LLM.
+    Falls back to ReAct for any step that fails or requires judgment.
+    """
+
+    def __init__(self, llm: LLMProvider, tools: 'ToolRuntime', security: 'SecurityManager'):
+        self.llm = llm
+        self.tools = tools
+        self.security = security
+
+    async def generate_plan(self, prompt: str, workspace_state: str) -> list[dict]:
+        response = await self.llm.completion(
+            messages=[
+                {'role': 'system', 'content': PLANNER_SYSTEM_PROMPT},
+                {'role': 'user', 'content': f'{prompt}\n\nWorkspace contents:\n{workspace_state}'},
+            ],
+            tools=[PLAN_TOOL_DEFINITION],
+        )
+        tool_call = response.choices[0].message.tool_calls[0]
+        plan_data = json.loads(tool_call.function.arguments)
+        return plan_data.get('steps', [])
+
+    async def execute_plan(self, steps: list[dict]) -> list[dict]:
+        results = []
+        for step in steps:
+            if not await self.security.check_permission(step['tool'], step.get('args', {})):
+                results.append({'step': step, 'error': 'Permission denied'})
+                continue
+            try:
+                result = await self.tools.execute(step['tool'], **step.get('args', {}))
+                results.append({'step': step, 'result': result})
+            except Exception as e:
+                results.append({'step': step, 'error': str(e)})
+                # Stop executing remaining steps on failure; caller should fall back to ReAct
+                break
+        return results
+
+
+PLANNER_SYSTEM_PROMPT = """You are generating an execution plan for a Linux automation task.
+
+Create a plan with concrete, executable steps using the create_plan tool.
+Each step specifies a tool and its arguments.
+
+Available tools: run_bash, browser_goto, browser_click, browser_type, browser_read, mcp_call
+
+Safety rules:
+- Use trash instead of rm for deletions
+- All file operations scoped to /workspace
+- Include verification steps where appropriate"""
+
+
+PLAN_TOOL_DEFINITION = {
+    'type': 'function',
+    'function': {
+        'name': 'create_plan',
+        'description': 'Create an execution plan for the user task',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'goal': {
+                    'type': 'string',
+                    'description': 'One-sentence summary of the goal',
+                },
+                'steps': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'tool': {
+                                'type': 'string',
+                                'enum': ['run_bash', 'browser_goto', 'browser_click',
+                                         'browser_type', 'browser_read', 'mcp_call'],
+                            },
+                            'args': {'type': 'object'},
+                            'description': {'type': 'string'},
+                        },
+                        'required': ['tool', 'args', 'description'],
+                    },
+                },
+            },
+            'required': ['goal', 'steps'],
+        },
+    },
+}
 ```
 
 ---
 
-### Layer 4: Tool Registry (Execution Layer)
+## Layer 3: Tool Runtime
 
-**Purpose:** Tool definitions and execution with safety checks
+**Purpose:** Tool definitions, execution, and MCP integration.
+
+### Tool Registry
 
 ```python
-class ToolRegistry:
-    """
-    Central registry of available tools
-    Provides OpenAI-compatible tool definitions
-    Executes tool calls with safety checks
-    """
-    
-    def __init__(self, context: ContextManager):
-        self.context = context
-        self.security = SecurityManager()
-        self.bash = BashREPL(context, self.security)
-        self.browser = BrowserAutomation(context, self.security)
-        self.vision = VisionModel(context)
-    
-    def get_definitions(self) -> List[Dict]:
-        """
-        Return OpenAI-compatible tool definitions
-        These are passed to the LLM for function calling
-        """
+import shlex
+import urllib.parse
+from typing import Any
+
+
+class ToolRuntime:
+    """Central tool registry. Routes tool calls to the appropriate handler."""
+
+    def __init__(self, sandbox: 'BubblewrapSandbox | GVisorSandbox', security: 'SecurityManager'):
+        self.sandbox = sandbox
+        self.security = security
+        self.bash = BashTool(sandbox, security)
+        self.browser = BrowserTool(security)
+        self.mcp_manager = MCPManager()
+
+    def get_definitions(self) -> list[dict]:
         return [
-            {
-                'type': 'function',
-                'function': {
-                    'name': 'run_bash',
-                    'description': 'Execute a bash command in the secure workspace. Use for file operations, git, package installation, etc.',
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {
-                            'command': {
-                                'type': 'string',
-                                'description': 'The bash command to execute'
-                            },
-                            'working_dir': {
-                                'type': 'string',
-                                'description': 'Working directory (default: /workspace)'
-                            }
-                        },
-                        'required': ['command']
-                    }
-                }
+            *self.bash.definitions(),
+            *self.browser.definitions(),
+            *self.mcp_manager.get_tool_definitions(),
+        ]
+
+    async def execute(self, func_name: str, **kwargs) -> Any:
+        if func_name == 'run_bash':
+            return await self.bash.execute(kwargs['command'], kwargs.get('working_dir', '/workspace'))
+        elif func_name.startswith('browser_'):
+            action = func_name.replace('browser_', '')
+            return await self.browser.execute(action, **kwargs)
+        elif func_name.startswith('mcp_'):
+            # Route mcp_servername_toolname to the correct server and tool
+            parts = func_name.split('_', 2)
+            if len(parts) == 3:
+                return await self.mcp_manager.call_tool(parts[1], parts[2], kwargs)
+            return await self.mcp_manager.call_tool(
+                kwargs.get('server', ''), kwargs.get('tool', ''), kwargs.get('args', {}),
+            )
+        else:
+            return {'error': f'Unknown tool: {func_name}'}
+
+    async def close(self):
+        await self.browser.close()
+        await self.mcp_manager.close()
+```
+
+### Bash Tool
+
+```python
+class BashTool:
+    """
+    Bash execution with safety intercepts.
+
+    The command blocklist and rm-to-trash intercept are defense-in-depth measures,
+    not a security boundary. The LLM can invoke Python, Perl, or other interpreters
+    to bypass command-level intercepts. The real security boundary is the kernel-level
+    sandbox (Layer 1), which restricts filesystem access regardless of how commands
+    are invoked.
+
+    shell=True is never used. Commands are parsed to lists via shlex and
+    executed as subprocess arguments.
+    """
+
+    BLOCKED_COMMANDS = {'dd', 'mkfs', 'fdisk', 'mount', 'umount', 'chown', 'su', 'sudo'}
+    TRASH_INTERCEPTED = {'rm'}
+
+    def __init__(self, sandbox, security: 'SecurityManager'):
+        self.sandbox = sandbox
+        self.security = security
+
+    def definitions(self) -> list[dict]:
+        return [{
+            'type': 'function',
+            'function': {
+                'name': 'run_bash',
+                'description': 'Execute a bash command in the secure workspace. Use for file operations, data processing, package installation.',
+                'parameters': {
+                    'type': 'object',
+                    'properties': {
+                        'command': {'type': 'string', 'description': 'The bash command to execute'},
+                        'working_dir': {'type': 'string', 'description': 'Working directory (default: /workspace)'},
+                    },
+                    'required': ['command'],
+                },
             },
+        }]
+
+    async def execute(self, command: str, working_dir: str = '/workspace') -> dict:
+        try:
+            cmd_parts = shlex.split(command)
+        except ValueError as e:
+            return {'error': f'Invalid command syntax: {e}', 'exit_code': -1}
+
+        if not cmd_parts:
+            return {'error': 'Empty command', 'exit_code': -1}
+
+        base_cmd = cmd_parts[0]
+
+        if base_cmd in self.BLOCKED_COMMANDS:
+            return {'error': f'Command blocked for safety: {base_cmd}', 'exit_code': -1}
+
+        if base_cmd in self.TRASH_INTERCEPTED:
+            return await self._safe_delete(cmd_parts[1:])
+
+        for part in cmd_parts[1:]:
+            if part.startswith('/') and not self.security.validate_path(part):
+                return {'error': f'Path outside allowed roots: {part}', 'exit_code': -1}
+
+        result = self.sandbox.execute(cmd_parts, timeout=30)
+
+        # Truncate large outputs to protect context window
+        stdout = result.get('stdout', '')
+        if len(stdout) > 10_000:
+            result['stdout'] = stdout[:5_000] + '\n\n... [truncated, showing first 5000 and last 2000 chars] ...\n\n' + stdout[-2_000:]
+            result['truncated'] = True
+
+        return result
+
+    async def _safe_delete(self, targets: list[str]) -> dict:
+        results = []
+        for target in targets:
+            if target.startswith('-'):
+                continue
+            result = self.security.safe_delete(target)
+            results.append(result)
+        return {'stdout': '\n'.join(results), 'exit_code': 0}
+```
+
+### Browser Tool (Playwright, Async)
+
+```python
+class BrowserTool:
+    """
+    Playwright-based browser automation.
+
+    Key design choices:
+    - Async Playwright API
+    - 'domcontentloaded' wait strategy (SPAs never reach 'networkidle')
+    - inner_text() instead of content() to reduce token usage ~90%
+    - Route interception to enforce domain allowlist on ALL navigations,
+      including redirects and clicks, not only explicit goto calls
+    """
+
+    MAX_CONTENT_CHARS = 8_000
+
+    def __init__(self, security: 'SecurityManager'):
+        self.security = security
+        self._pw = None
+        self._browser = None
+        self._page = None
+
+    async def _ensure_browser(self):
+        if self._pw is None:
+            from playwright.async_api import async_playwright
+            self._pw = await async_playwright().start()
+            self._browser = await self._pw.chromium.launch(headless=True)
+            self._page = await self._browser.new_page()
+
+            # Intercept document navigations to enforce domain allowlist globally
+            await self._page.route('**/*', self._route_handler)
+
+    async def _route_handler(self, route):
+        """Block document navigations to domains outside the allowlist."""
+        if route.request.resource_type == 'document':
+            domain = urllib.parse.urlparse(route.request.url).netloc
+            if domain and not self.security.check_network_permission(domain):
+                await route.abort('blockedbyclient')
+                return
+        await route.continue_()
+
+    def definitions(self) -> list[dict]:
+        return [
             {
                 'type': 'function',
                 'function': {
@@ -879,26 +897,26 @@ class ToolRegistry:
                     'parameters': {
                         'type': 'object',
                         'properties': {
-                            'url': {'type': 'string', 'description': 'URL to visit'}
+                            'url': {'type': 'string', 'description': 'URL to navigate to'},
                         },
-                        'required': ['url']
-                    }
-                }
+                        'required': ['url'],
+                    },
+                },
             },
             {
                 'type': 'function',
                 'function': {
                     'name': 'browser_click',
-                    'description': 'Click an element on the page using CSS selector',
+                    'description': 'Click an element using CSS selector',
                     'parameters': {
                         'type': 'object',
                         'properties': {
-                            'selector': {'type': 'string', 'description': 'CSS selector'},
-                            'timeout': {'type': 'integer', 'description': 'Wait timeout in ms'}
+                            'selector': {'type': 'string'},
+                            'timeout': {'type': 'integer', 'description': 'Wait timeout in ms (default 10000)'},
                         },
-                        'required': ['selector']
-                    }
-                }
+                        'required': ['selector'],
+                    },
+                },
             },
             {
                 'type': 'function',
@@ -909,1476 +927,1200 @@ class ToolRegistry:
                         'type': 'object',
                         'properties': {
                             'selector': {'type': 'string'},
-                            'text': {'type': 'string'}
+                            'text': {'type': 'string'},
                         },
-                        'required': ['selector', 'text']
-                    }
-                }
+                        'required': ['selector', 'text'],
+                    },
+                },
             },
             {
                 'type': 'function',
                 'function': {
                     'name': 'browser_read',
-                    'description': 'Extract text content from the page',
+                    'description': 'Extract text content from the page or a specific element',
                     'parameters': {
                         'type': 'object',
                         'properties': {
-                            'selector': {'type': 'string', 'description': 'CSS selector (optional, reads entire page if not provided)'}
-                        }
-                    }
-                }
-            },
-            {
-                'type': 'function',
-                'function': {
-                    'name': 'vision_analyze',
-                    'description': 'Analyze a screenshot using vision model (fallback when DOM fails)',
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {
-                            'task': {'type': 'string', 'description': 'What to look for in the image'}
+                            'selector': {
+                                'type': 'string',
+                                'description': 'CSS selector (reads visible text of full page if omitted)',
+                            },
                         },
-                        'required': ['task']
-                    }
-                }
+                    },
+                },
             },
-            {
-                'type': 'function',
-                'function': {
-                    'name': 'vision_click',
-                    'description': 'Click coordinates on screen using vision (use when selector fails)',
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {
-                            'description': {'type': 'string', 'description': 'What element to click'}
-                        },
-                        'required': ['description']
-                    }
-                }
-            }
         ]
-    
-    def execute(self, func_name: str, **kwargs) -> Any:
-        """
-        Execute a tool call
-        Routes to appropriate handler
-        """
-        # Route to appropriate tool
-        if func_name == 'run_bash':
-            return self.bash.execute(kwargs['command'], kwargs.get('working_dir', '/workspace'))
-        
-        elif func_name.startswith('browser_'):
-            action = func_name.replace('browser_', '')
-            return self.browser.execute(action, **kwargs)
-        
-        elif func_name.startswith('vision_'):
-            action = func_name.replace('vision_', '')
-            return self.vision.execute(action, **kwargs)
-        
-        else:
-            return {'error': f'Unknown tool: {func_name}'}
 
-class BashREPL:
-    """
-    Bash execution with safety intercepts
-    """
-    
-    def __init__(self, context: ContextManager, security: SecurityManager):
-        self.context = context
-        self.security = security
-        self.history: List[str] = []
-    
-    def execute(self, command: str, working_dir: str = '/workspace') -> Dict:
-        """
-        Execute bash command with safety checks
-        
-        Returns:
-            {'stdout': str, 'stderr': str, 'exit_code': int}
-        """
-        # Parse command
-        cmd_parts = shlex.split(command)
-        
-        # Safety intercepts
-        if cmd_parts[0] == 'rm':
-            return self._safe_delete(cmd_parts[1:])
-        
-        elif cmd_parts[0] == 'dd':
-            return {'error': 'dd is not allowed (potential data destruction)'}
-        
-        # Execute command
+    async def execute(self, action: str, **kwargs) -> dict:
+        await self._ensure_browser()
         try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=working_dir
-            )
-            
-            # Log to history
-            self.history.append(command)
-            
-            # Update context with file changes
-            if cmd_parts[0] in ['touch', 'cp', 'mv', 'mkdir']:
-                self._update_context_files(cmd_parts)
-            
-            return {
-                'stdout': result.stdout,
-                'stderr': result.stderr,
-                'exit_code': result.returncode
-            }
-        
-        except subprocess.TimeoutExpired:
-            return {'error': 'Command timeout (30s limit)'}
-        
-        except Exception as e:
-            return {'error': str(e)}
-    
-    def _safe_delete(self, targets: List[str]) -> Dict:
-        """
-        Intercept rm and use trash instead
-        """
-        results = []
-        for target in targets:
-            result = self.security.safe_delete(target)
-            results.append(result)
-        
-        # Update context
-        self.context.update('files_deleted', 
-                          self.context.get('files_deleted', []) + targets)
-        
-        return {'stdout': '\n'.join(results)}
-    
-    def _update_context_files(self, cmd_parts: List[str]):
-        """Update context with file operations"""
-        if cmd_parts[0] == 'touch':
-            self.context.update('files_created',
-                              self.context.get('files_created', []) + [cmd_parts[1]])
-
-class BrowserAutomation:
-    """
-    Playwright-based browser automation
-    Falls back to vision when DOM fails
-    """
-    
-    def __init__(self, context: ContextManager, security: SecurityManager):
-        self.context = context
-        self.security = security
-        self.playwright = None
-        self.browser = None
-        self.page = None
-        self.checkpoints: List[Dict] = []
-    
-    def _ensure_browser(self):
-        """Lazy initialization of Playwright"""
-        if self.playwright is None:
-            from playwright.sync_api import sync_playwright
-            self.playwright = sync_playwright().start()
-            self.browser = self.playwright.chromium.launch(headless=True)
-            self.page = self.browser.new_page()
-    
-    def execute(self, action: str, **kwargs) -> Dict:
-        """
-        Execute browser action with error handling
-        """
-        self._ensure_browser()
-        
-        try:
-            # Save checkpoint before action
-            self._save_checkpoint()
-            
             if action == 'goto':
-                return self._goto(kwargs['url'])
+                return await self._goto(kwargs['url'])
             elif action == 'click':
-                return self._click(kwargs['selector'], kwargs.get('timeout', 30000))
+                return await self._click(kwargs['selector'], kwargs.get('timeout', 10_000))
             elif action == 'type':
-                return self._type(kwargs['selector'], kwargs['text'])
+                return await self._type(kwargs['selector'], kwargs['text'])
             elif action == 'read':
-                return self._read(kwargs.get('selector'))
+                return await self._read(kwargs.get('selector'))
             else:
-                return {'error': f'Unknown action: {action}'}
-        
-        except PlaywrightTimeoutError as e:
-            # Try vision fallback
-            print(f"    Warning: Playwright timeout, trying vision fallback...{e}")
-            return self._vision_fallback(action, kwargs)
-        
+                return {'error': f'Unknown browser action: {action}'}
         except Exception as e:
-            return {'error': str(e), 'checkpoint_available': bool(self.checkpoints)}
-    
-    def _goto(self, url: str) -> Dict:
-        """Navigate to URL"""
-        # Check network permissions
+            return {'error': str(e), 'action': action}
+
+    async def _goto(self, url: str) -> dict:
         domain = urllib.parse.urlparse(url).netloc
         if not self.security.check_network_permission(domain):
             return {'error': f'Domain not in allowlist: {domain}'}
-        
-        self.page.goto(url, wait_until='networkidle')
-        self.context.update('current_url', url)
-        
-        return {'status': 'success', 'url': self.page.url}
-    
-    def _click(self, selector: str, timeout: int) -> Dict:
-        """Click element"""
-        self.page.click(selector, timeout=timeout)
-        return {'status': 'success', 'selector': selector}
-    
-    def _type(self, selector: str, text: str) -> Dict:
-        """Type into input"""
-        self.page.fill(selector, text)
-        return {'status': 'success', 'selector': selector}
-    
-    def _read(self, selector: Optional[str]) -> Dict:
-        """Extract text"""
-        if selector:
-            text = self.page.text_content(selector)
-        else:
-            text = self.page.content()
-        
-        return {'text': text}
-    
-    def _save_checkpoint(self):
-        """Save browser state for recovery"""
-        checkpoint = {
-            'url': self.page.url,
-            'cookies': self.page.context.cookies(),
-            'local_storage': self.page.evaluate('() => JSON.stringify(localStorage)'),
-            'timestamp': time.time()
-        }
-        self.checkpoints.append(checkpoint)
-        
-        # Save to disk
-        checkpoint_path = Path.home() / '.cowork' / 'browser_checkpoints'
-        checkpoint_path.mkdir(parents=True, exist_ok=True)
-        
-        with open(checkpoint_path / f"{int(time.time())}.json", 'w') as f:
-            json.dump(checkpoint, f)
-        
-        # Update context
-        self.context.update('browser_cookies', checkpoint['cookies'])
-    
-    def restore_checkpoint(self, checkpoint_id: Optional[int] = None):
-        """Restore browser state from checkpoint"""
-        if checkpoint_id is None:
-            checkpoint = self.checkpoints[-1]
-        else:
-            checkpoint_path = Path.home() / '.cowork' / 'browser_checkpoints' / f"{checkpoint_id}.json"
-            with open(checkpoint_path) as f:
-                checkpoint = json.load(f)
-        
-        # Restore state
-        self.page.goto(checkpoint['url'])
-        self.page.context.add_cookies(checkpoint['cookies'])
-        self.page.evaluate(f"localStorage = {checkpoint['local_storage']}")
-    
-    def _vision_fallback(self, action: str, kwargs: Dict) -> Dict:
-        """
-        When Playwright fails, use vision model
-        """
-        screenshot = self.page.screenshot()
-        
-        vision_prompt = f"""
-        The DOM-based {action} failed with selector: {kwargs.get('selector')}
-        
-        Task: {action} with args {kwargs}
-        
-        Please analyze this screenshot and provide coordinates to click,
-        or explain why the action cannot be completed.
-        """
-        
-        # Call vision model (implemented in VisionModel class)
-        from vision import VisionModel
-        vision = VisionModel(self.context)
-        return vision.analyze_and_act(screenshot, vision_prompt)
 
-class VisionModel:
-    """Vision-based fallback for when DOM automation fails"""
-    
-    def __init__(self, context: ContextManager):
-        self.context = context
-        self.llm = LLMProvider()
-    
-    def execute(self, action: str, **kwargs) -> Dict:
-        if action == 'analyze':
-            return self.analyze_screenshot(kwargs['task'])
-        elif action == 'click':
-            return self.find_and_click(kwargs['description'])
+        await self._page.goto(url, wait_until='domcontentloaded', timeout=30_000)
+        return {'status': 'success', 'url': self._page.url, 'title': await self._page.title()}
+
+    async def _click(self, selector: str, timeout: int) -> dict:
+        await self._page.click(selector, timeout=timeout)
+        return {'status': 'success', 'selector': selector}
+
+    async def _type(self, selector: str, text: str) -> dict:
+        await self._page.fill(selector, text)
+        return {'status': 'success'}
+
+    async def _read(self, selector: str = None) -> dict:
+        if selector:
+            text = await self._page.inner_text(selector)
         else:
-            return {'error': f'Unknown vision action: {action}'}
-    
-    def analyze_screenshot(self, task: str) -> Dict:
+            text = await self._page.inner_text('body')
+
+        if len(text) > self.MAX_CONTENT_CHARS:
+            text = text[:self.MAX_CONTENT_CHARS] + f'\n\n... [truncated at {self.MAX_CONTENT_CHARS} chars]'
+
+        return {'text': text, 'length': len(text)}
+
+    async def close(self):
+        if self._browser:
+            await self._browser.close()
+        if self._pw:
+            await self._pw.stop()
+        self._pw = None
+        self._browser = None
+        self._page = None
+
+    async def restart(self):
+        """Kill and restart the browser to clear memory leaks and stale state."""
+        await self.close()
+        await self._ensure_browser()
+```
+
+### MCP Integration
+
+```python
+from dataclasses import dataclass
+
+
+class MCPManager:
+    """
+    Model Context Protocol integration.
+
+    MCP is the standard for connecting AI agents to external tools.
+    Supports the entire ecosystem of pre-built MCP servers:
+    filesystem, git, GitHub, Slack, Google Drive, databases, etc.
+
+    Tool results from MCP servers are treated as untrusted external data
+    and are truncated/sanitized prior to inclusion in LLM context.
+
+    Reference: https://modelcontextprotocol.io/
+    """
+
+    def __init__(self):
+        self.servers: dict[str, 'MCPServerConnection'] = {}
+
+    async def connect_server(self, name: str, command: list[str], env: dict = None):
         """
-        Take screenshot and analyze with vision model
+        Connect to an MCP server (stdio transport).
+
+        Example:
+            await mcp.connect_server('filesystem',
+                ['npx', '@modelcontextprotocol/server-filesystem', '/workspace'])
+            await mcp.connect_server('github',
+                ['npx', '@modelcontextprotocol/server-github'],
+                {'GITHUB_TOKEN': '...'})
         """
-        # Take screenshot (assumes browser is active)
-        screenshot_path = f"/tmp/screenshot_{int(time.time())}.png"
-        # Screenshot taken by browser automation
-        
-        # Encode as base64
-        with open(screenshot_path, 'rb') as f:
-            image_data = base64.b64encode(f.read()).decode()
-        
-        # Call vision model
-        response = self.llm.completion(
-            messages=[{
-                'role': 'user',
-                'content': [
-                    {'type': 'text', 'text': task},
-                    {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{image_data}'}}
-                ]
-            }],
-            category='vision'
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        server_params = StdioServerParameters(
+            command=command[0],
+            args=command[1:],
+            env=env,
         )
-        
-        return {
-            'analysis': response['choices'][0]['message']['content']
-        }
-    
-    def find_and_click(self, description: str) -> Dict:
-        """
-        Find element in screenshot and return coordinates
-        """
-        analysis = self.analyze_screenshot(f"Find {description} and return X,Y coordinates")
-        
-        # Parse coordinates from response
-        # Format expected: "coordinates: (X, Y)"
-        import re
-        match = re.search(r'\((\d+),\s*(\d+)\)', analysis['analysis'])
-        
-        if match:
-            x, y = int(match.group(1)), int(match.group(2))
-            # Use pyautogui or similar to click
-            # (This requires display server access - container needs X11/Wayland)
-            return {'status': 'success', 'coordinates': (x, y)}
-        else:
-            return {'error': 'Could not find element', 'analysis': analysis['analysis']}
+        transport = await stdio_client(server_params).__aenter__()
+        session = ClientSession(*transport)
+        await session.initialize()
+
+        self.servers[name] = MCPServerConnection(
+            name=name,
+            session=session,
+            tools=await session.list_tools(),
+        )
+
+    def get_tool_definitions(self) -> list[dict]:
+        definitions = []
+        for server in self.servers.values():
+            for tool in server.tools:
+                definitions.append({
+                    'type': 'function',
+                    'function': {
+                        'name': f'mcp_{server.name}_{tool.name}',
+                        'description': f'[MCP:{server.name}] {tool.description}',
+                        'parameters': tool.inputSchema,
+                    },
+                })
+        return definitions
+
+    async def call_tool(self, server_name: str, tool_name: str, args: dict) -> dict:
+        if server_name not in self.servers:
+            return {'error': f'MCP server not connected: {server_name}'}
+
+        server = self.servers[server_name]
+        try:
+            result = await server.session.call_tool(tool_name, args)
+            content = str(result.content)
+            # Truncate large MCP results to prevent context saturation
+            if len(content) > 5_000:
+                content = content[:4_000] + '\n...[truncated]...\n' + content[-500:]
+            return {'result': content, 'source': 'mcp', 'server': server_name}
+        except Exception as e:
+            return {'error': str(e)}
+
+    async def close(self):
+        for server in self.servers.values():
+            try:
+                await server.session.__aexit__(None, None, None)
+            except Exception:
+                pass
+        self.servers.clear()
+
+
+@dataclass
+class MCPServerConnection:
+    name: str
+    session: Any
+    tools: list
 ```
 
 ---
 
-### Layer 6: Security Manager
+## Layer 4: Security Manager
 
-**Purpose:** Permission management and safety enforcement
+**Purpose:** Permission management and safety enforcement at the application level.
+This is defense-in-depth ON TOP of kernel-level sandbox isolation (Layer 1).
 
 ```python
+import shutil
+import uuid
+from pathlib import Path
+
+
 class SecurityManager:
     """
-    Manages permissions and safety checks
-    Implements:
-      - File path validation
-      - Network domain allowlist
-      - Trash bin for safe delete
-      - Intent-based permission model
+    Application-level security (Layer 4).
+    Works in conjunction with kernel-level sandbox (Layer 1).
+
+    Defense layers:
+    1. Sandbox (kernel) — namespace/gVisor/Firecracker isolation
+    2. This class — path validation, permission model, trash delete
+    3. Network — sandbox --unshare-net + route interception in browser
     """
-    
-    def __init__(self):
-        self.trash_path = Path('/home/agent/.cowork/trash')
+
+    def __init__(self, workspace: Path, event_bus: 'EventBus' = None):
+        self.workspace = workspace.resolve()
+        self.trash_path = Path.home() / '.cowork' / 'trash'
         self.trash_path.mkdir(parents=True, exist_ok=True)
-        
-        # Allowed file roots
+
         self.allowed_roots = [
-            Path('/workspace'),
+            self.workspace,
             Path('/tmp'),
-            self.trash_path
+            self.trash_path,
         ]
-        
-        # Network allowlist
-        self.allowed_domains = {
-            'pypi.org',
-            'github.com',
-            'google.com',
-            'gmail.com',
-            'githubusercontent.com',
+
+        # Network allowlist (enforced at both application and kernel level)
+        self.allowed_domains: set[str] = {
+            'pypi.org', 'files.pythonhosted.org',
+            'github.com', 'raw.githubusercontent.com',
+            'registry.npmjs.org',
         }
-        
-        # Session permissions (granted by user)
-        self.session_grants: Set[Path] = set()
-        
-        # High-risk operations that require confirmation
-        self.high_risk_operations = {
-            'delete', 'encrypt', 'upload', 'exec'
-        }
-    
+
+        self.session_grants: set[Path] = set()
+        self.event_bus = event_bus
+
     def validate_path(self, path_str: str) -> bool:
-        """
-        Check if path is within allowed roots
-        
-        Returns:
-            True if path is safe, False otherwise
-        """
+        """Check if path is within allowed roots. Resolves symlinks."""
         try:
             path = Path(path_str).resolve()
-            return any(path.is_relative_to(root) for root in self.allowed_roots)
-        except (ValueError, RuntimeError):
+            if any(path.is_relative_to(root) for root in self.allowed_roots):
+                return True
+            return any(path.is_relative_to(grant) for grant in self.session_grants)
+        except (ValueError, RuntimeError, OSError):
             return False
-    
-    def check_file_permission(self, operation: str, path: Path) -> bool:
+
+    async def check_permission(self, tool: str, args: dict) -> bool:
         """
-        Intent-based permission check
-        
-        Args:
-            operation: 'read', 'write', 'delete', 'encrypt', etc.
-            path: Path to check
-        
-        Returns:
-            True if allowed, False if denied
+        Intent-based permission check.
+        Read operations: auto-granted.
+        Write operations within workspace: auto-granted.
+        Risky operations: prompt user via EventBus.
         """
-        # Always allow safe operations
-        if operation in ['read', 'list']:
+        if tool in ('browser_read', 'browser_goto'):
             return True
-        
-        # Check if path is within session grants
-        if any(path.is_relative_to(grant) for grant in self.session_grants):
-            # Still check for high-risk operations
-            if operation in self.high_risk_operations:
-                return self.confirm_with_preview(operation, path)
+
+        if tool == 'run_bash':
+            command = args.get('command', '')
+            try:
+                cmd_parts = shlex.split(command) if command else []
+            except ValueError:
+                return False
+            if cmd_parts and cmd_parts[0] in BashTool.BLOCKED_COMMANDS:
+                return False
+            for part in cmd_parts:
+                if part.startswith('/') and not self.validate_path(part):
+                    return await self._ask_permission(
+                        f'Command accesses path outside workspace: {part}',
+                        risk='high',
+                    )
             return True
-        
-        # Not in session grants - need user approval
-        return self.request_permission(operation, path)
-    
-    def request_permission(self, operation: str, path: Path) -> bool:
-        """
-        Ask user for permission
-        """
-        message = f"Allow {operation} on {path}?"
-        
-        # In production, this would show a UI prompt TODO
-        if not self.validate_path(str(path)):
-            print(f"    Denied: {operation} on {path} (outside workspace)")
-            return False
-        
-        # Simulate user approval
-        choice = input(f"{message} [y/N]: ")
-        return choice.lower() == 'y'
-    
-    def confirm_with_preview(self, operation: str, path: Path) -> bool:
-        """
-        High-risk operations show preview of what will happen
-        """
-        if operation == 'delete':
-            # Count files that will be affected
-            if path.is_dir():
-                file_count = sum(1 for _ in path.rglob('*') if _.is_file())
-                total_size = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
-                
-                preview = f"""
-                About to delete directory: {path}
-                  - {file_count} files
-                  - {total_size / 1e6:.1f} MB total
-                
-                Files will be moved to trash (recoverable).
-                """
-            else:
-                preview = f"About to delete: {path} ({path.stat().st_size / 1e6:.1f} MB)"
-            
-            print(preview)
-            choice = input("Confirm [y/N]: ")
-            return choice.lower() == 'y'
-        
-        # Other high-risk operations
-        return self.request_permission(operation, path)
-    
-    def safe_delete(self, path_str: str) -> str:
-        """
-        Move to trash instead of permanent delete
-        
-        Returns:
-            Status message
-        """
-        if not self.validate_path(path_str):
-            return f"Error: Permission denied (path outside workspace): {path_str}"
-        
-        src = Path(path_str)
-        if not src.exists():
-            return f"Error: File not found: {path_str}"
-        
-        # Create trash destination with timestamp
-        timestamp = int(time.time())
-        dst = self.trash_path / f"{src.name}.{timestamp}"
-        
-        try:
-            shutil.move(str(src), str(dst))
-            return f"Moved to trash: {dst}"
-        except Exception as e:
-            return f"Error: {e}"
-    
+
+        if tool in ('browser_click', 'browser_type'):
+            return True
+
+        return await self._ask_permission(
+            f'Allow {tool} with args {json.dumps(args, default=str)[:200]}?',
+            risk='medium',
+        )
+
     def check_network_permission(self, domain: str) -> bool:
-        """
-        Check if network request to domain is allowed
-        
-        Returns:
-            True if allowed, False if blocked
-        """
-        # Check allowlist
         if domain in self.allowed_domains:
             return True
-        
-        # Check if subdomain of allowed domain
         for allowed in self.allowed_domains:
-            if domain.endswith(f".{allowed}"):
+            if domain.endswith(f'.{allowed}'):
                 return True
-        
-        # Unknown domain - ask user
-        print(f"    Security Alert: Agent wants to access {domain}")
-        choice = input(f"Allow network access to {domain}? [y/N]: ")
-        
-        if choice.lower() == 'y':
-            self.allowed_domains.add(domain)
-            return True
-        
         return False
-    
+
+    def safe_delete(self, path_str: str) -> str:
+        """Move to trash instead of permanent delete."""
+        if not self.validate_path(path_str):
+            return f'Error: Path outside workspace: {path_str}'
+
+        src = Path(path_str)
+        if not src.exists():
+            return f'Error: Not found: {path_str}'
+
+        dst = self.trash_path / f'{src.name}.{uuid.uuid4().hex[:8]}'
+        try:
+            shutil.move(str(src), str(dst))
+            return f'Moved to trash: {dst.name}'
+        except Exception as e:
+            return f'Error: {e}'
+
+    async def _ask_permission(self, message: str, risk: str = 'medium') -> bool:
+        """Ask user via EventBus. Returns False on timeout or if no EventBus configured."""
+        if self.event_bus:
+            return await self.event_bus.request_permission(message, risk)
+        return False
+
     def grant_session_access(self, path: Path):
-        """
-        Grant access to a path for this session
-        Called when user explicitly mentions a folder in their prompt
-        """
         self.session_grants.add(path.resolve())
-        print(f"    Granted session access to: {path}")
+
+    def add_allowed_domain(self, domain: str):
+        self.allowed_domains.add(domain)
 ```
 
 ---
 
-### Layer 7: Recovery Manager
+## Layer 5: Observability & TUI
 
-**Purpose:** Checkpointing and error recovery
+**Purpose:** Real-time user interface, audit logging, cost display, and structured logging.
 
-```python
-class RecoveryManager:
-    """
-    Manages checkpoints and recovery
-    Combines:
-      - Trash bins for file recovery
-      - State checkpoints for context recovery
-      - Browser state storage for session recovery
-    """
-    
-    def __init__(self):
-        self.trash_dir = Path.home() / '.cowork' / 'trash'
-        self.checkpoint_dir = Path.home() / '.cowork' / 'checkpoints'
-        self.browser_checkpoint_dir = Path.home() / '.cowork' / 'browser_checkpoints'
-        
-        # Create directories
-        for dir in [self.trash_dir, self.checkpoint_dir, self.browser_checkpoint_dir]:
-            dir.mkdir(parents=True, exist_ok=True)
-        
-        self.checkpoints: List[Checkpoint] = []
-    
-    def save_checkpoint(self, session_id: str, context: ContextManager, 
-                       step_number: int) -> str:
-        """
-        Save checkpoint for potential recovery
-        
-        Returns:
-            checkpoint_id
-        """
-        checkpoint_id = f"{session_id}_{step_number}_{int(time.time())}"
-        
-        checkpoint_data = {
-            'checkpoint_id': checkpoint_id,
-            'session_id': session_id,
-            'step_number': step_number,
-            'timestamp': time.time(),
-            'context': context.state,
-            'history': context.history,
-            'file_hashes': self._compute_file_hashes(),
-        }
-        
-        # Save to disk
-        checkpoint_path = self.checkpoint_dir / f"{checkpoint_id}.json"
-        with open(checkpoint_path, 'w') as f:
-            json.dump(checkpoint_data, f, indent=2)
-        
-        self.checkpoints.append(Checkpoint(**checkpoint_data))
-        
-        return checkpoint_id
-    
-    def load_checkpoint(self, checkpoint_id: str) -> Dict:
-        """Load checkpoint data from disk"""
-        checkpoint_path = self.checkpoint_dir / f"{checkpoint_id}.json"
-        
-        if not checkpoint_path.exists():
-            raise CheckpointNotFound(f"No checkpoint: {checkpoint_id}")
-        
-        with open(checkpoint_path) as f:
-            return json.load(f)
-    
-    def generate_recovery_plan(self, checkpoint: Dict, error: Exception) -> str:
-        """
-        Generate LLM prompt for recovery
-        Instead of rolling back time, we provide context for the LLM to replan
-        """
-        files_changed = self._diff_from_checkpoint(checkpoint)
-        
-        prompt = f"""
-        Task failed at step {checkpoint['step_number']}
-        
-        Error: {str(error)}
-        
-        Context at checkpoint:
-        {json.dumps(checkpoint['context'], indent=2)}
-        
-        Files modified since checkpoint:
-        {json.dumps(files_changed, indent=2)}
-        
-        Last actions taken:
-        {json.dumps(checkpoint['history'][-5:], indent=2)}
-        
-        Generate a recovery plan:
-        1. What went wrong?
-        2. What state are we in now?
-        3. What steps should we take to complete the task?
-        """
-        
-        return prompt
-    
-    def restore_from_trash(self, pattern: str) -> List[Path]:
-        """
-        Find files in trash matching pattern
-        Used for user-initiated recovery: "restore the file I deleted"
-        """
-        matches = list(self.trash_dir.glob(f"*{pattern}*"))
-        return matches
-    
-    def _compute_file_hashes(self) -> Dict[str, str]:
-        """
-        Compute MD5 hashes of all files in workspace
-        Used to detect what changed between checkpoints
-        """
-        hashes = {}
-        workspace = Path('/workspace')
-        
-        for file_path in workspace.rglob('*'):
-            if file_path.is_file():
-                try:
-                    with open(file_path, 'rb') as f:
-                        file_hash = hashlib.md5(f.read()).hexdigest()
-                    hashes[str(file_path)] = file_hash
-                except (PermissionError, OSError):
-                    continue
-        
-        return hashes
-    
-    def _diff_from_checkpoint(self, checkpoint: Dict) -> Dict:
-        """
-        Compare current filesystem to checkpoint
-        Returns dict of {path: status} where status is 'added', 'modified', 'deleted'
-        """
-        current_hashes = self._compute_file_hashes()
-        checkpoint_hashes = checkpoint.get('file_hashes', {})
-        
-        changes = {}
-        
-        # Find added and modified files
-        for path, current_hash in current_hashes.items():
-            if path not in checkpoint_hashes:
-                changes[path] = 'added'
-            elif current_hash != checkpoint_hashes[path]:
-                changes[path] = 'modified'
-        
-        # Find deleted files
-        for path in checkpoint_hashes:
-            if path not in current_hashes:
-                changes[path] = 'deleted'
-        
-        return changes
+### TUI Layout
 
-@dataclass
-class Checkpoint:
-    checkpoint_id: str
-    session_id: str
-    step_number: int
-    timestamp: float
-    context: Dict
-    history: List
-    file_hashes: Dict
+```
+┌──────────────────────────────────────────────────┐
+│  Open Cowork                     [Pause] [Cancel] │
+├──────────────────────────────────────────────────┤
+│                                                   │
+│  Agent Output (streaming)                         │
+│  ─────────────────────────────                    │
+│  > Planning task...                               │
+│  > Step 1/5: mkdir -p output/                     │
+│  > Step 2/5: Downloading page...                  │
+│  > Step 3/5: Extracting data with pandas          │
+│    [████████░░░░░░░░░░] 45%                       │
+│                                                   │
+│  Cost: $0.03 | Turns: 5 | Model: deepseek-chat   │
+├──────────────────────────────────────────────────┤
+│  [Permission Request]                             │
+│  Agent wants to delete 15 files in /workspace/tmp │
+│  Files will be moved to trash (recoverable).      │
+│           [Allow]  [Deny]  [Allow All Session]    │
+├──────────────────────────────────────────────────┤
+│  > Enter task:                                    │
+│  ________________________________________________ │
+└──────────────────────────────────────────────────┘
 ```
 
----
-
-### Layer 8: Observability Stack
-
-**Purpose:** Real-time monitoring, logging, and user intervention
+### EventBus
 
 ```python
-class ProgressTracker:
-    """
-    Tracks task progress with heartbeats
-    Distinguishes between idle and busy-but-slow
-    """
-    
-    def __init__(self):
-        self.tasks: Dict[str, TaskProgress] = {}
-    
-    def start_task(self, task_id: str, total_items: Optional[int] = None, 
-                   description: str = "") -> TaskProgress:
-        """Initialize new task tracking"""
-        progress = TaskProgress(
-            task_id=task_id,
-            description=description,
-            started_at=time.time(),
-            last_heartbeat=time.time(),
-            total_items=total_items,
-            completed_items=0,
-            status='running'
-        )
-        
-        self.tasks[task_id] = progress
-        return progress
-    
-    def heartbeat(self, task_id: str, completed: Optional[int] = None, 
-                  message: Optional[str] = None):
-        """
-        Update task progress
-        Agent calls this periodically to show it's still working
-        """
-        if task_id not in self.tasks:
-            return
-        
-        task = self.tasks[task_id]
-        task.last_heartbeat = time.time()
-        
-        if completed is not None:
-            task.completed_items = completed
-        
-        if message:
-            task.messages.append({
-                'timestamp': time.time(),
-                'message': message
-            })
-    
-    def is_idle(self, task_id: str, idle_threshold: int = 300) -> bool:
-        """
-        Check if task is idle (no heartbeat for idle_threshold seconds)
-        
-        Args:
-            task_id: Task to check
-            idle_threshold: Seconds without heartbeat = idle
-        
-        Returns:
-            True if idle, False if still working
-        """
-        if task_id not in self.tasks:
-            return True
-        
-        task = self.tasks[task_id]
-        time_since_heartbeat = time.time() - task.last_heartbeat
-        
-        return time_since_heartbeat > idle_threshold
-    
-    def get_eta(self, task_id: str) -> Optional[float]:
-        """
-        Estimate time to completion
-        
-        Returns:
-            Seconds remaining, or None if cannot estimate
-        """
-        if task_id not in self.tasks:
-            return None
-        
-        task = self.tasks[task_id]
-        
-        if not task.total_items or task.completed_items == 0:
-            return None
-        
-        elapsed = time.time() - task.started_at
-        items_per_second = task.completed_items / elapsed
-        remaining_items = task.total_items - task.completed_items
-        
-        return remaining_items / items_per_second
-    
-    def finish_task(self, task_id: str, status: str = 'completed'):
-        """Mark task as complete"""
-        if task_id in self.tasks:
-            self.tasks[task_id].status = status
-            self.tasks[task_id].completed_at = time.time()
+import asyncio
+import time
+import uuid as uuid_mod
 
-@dataclass
-class TaskProgress:
-    task_id: str
-    description: str
-    started_at: float
-    last_heartbeat: float
-    total_items: Optional[int]
-    completed_items: int
-    status: str  # 'running', 'completed', 'failed', 'paused'
-    messages: List[Dict] = field(default_factory=list)
-    completed_at: Optional[float] = None
 
-class EventStream:
-    """
-    Real-time event stream for UI consumption
-    """
-    
+class EventBus:
+    """Async event bus for TUI updates and permission requests."""
+
     def __init__(self):
-        self.subscribers: List[Queue] = []
-        self.history: List[Event] = []
-    
-    def subscribe(self) -> Queue:
-        """
-        Subscribe to event stream
-        Returns queue that will receive events
-        """
-        queue = Queue()
-        self.subscribers.append(queue)
+        self._subscribers: list[asyncio.Queue] = []
+        self._pending_permissions: dict[str, asyncio.Future] = {}
+
+    def subscribe(self) -> asyncio.Queue:
+        queue = asyncio.Queue(maxsize=1000)
+        self._subscribers.append(queue)
         return queue
-    
-    def emit(self, event_type: str, data: Dict):
-        """
-        Emit event to all subscribers
-        """
-        event = Event(
-            type=event_type,
-            data=data,
-            timestamp=time.time()
-        )
-        
-        # Add to history
-        self.history.append(event)
-        
-        # Notify subscribers
-        for queue in self.subscribers:
+
+    async def emit(self, event_type: str, data: dict):
+        event = {'type': event_type, 'data': data, 'timestamp': time.time()}
+        for queue in self._subscribers:
             try:
                 queue.put_nowait(event)
-            except Full:
-                # Subscriber not consuming fast enough, skip
+            except asyncio.QueueFull:
                 pass
-    
-    def get_history(self, since: Optional[float] = None) -> List[Event]:
-        """Get event history since timestamp"""
-        if since is None:
-            return self.history
-        
-        return [e for e in self.history if e.timestamp >= since]
 
-@dataclass
-class Event:
-    type: str
-    data: Dict
-    timestamp: float
+    async def emit_action(self, tool: str, command: str, result: str = ''):
+        await self.emit('action', {'tool': tool, 'command': command, 'result': result})
+
+    async def emit_progress(self, step: int, total: int, message: str):
+        await self.emit('progress', {'step': step, 'total': total, 'message': message})
+
+    async def request_permission(self, message: str, risk: str) -> bool:
+        """
+        Emit permission request and wait for TUI to resolve it.
+        The TUI calls resolve_permission() when the user clicks Allow/Deny.
+        Defaults to deny on 60s timeout.
+        """
+        request_id = uuid_mod.uuid4().hex
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        self._pending_permissions[request_id] = future
+
+        await self.emit('permission_request', {
+            'message': message,
+            'risk': risk,
+            'request_id': request_id,
+        })
+
+        try:
+            return await asyncio.wait_for(future, timeout=60.0)
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            self._pending_permissions.pop(request_id, None)
+
+    def resolve_permission(self, request_id: str, granted: bool):
+        """Called by TUI when user clicks Allow/Deny."""
+        future = self._pending_permissions.get(request_id)
+        if future and not future.done():
+            future.set_result(granted)
+```
+
+### Audit Logger
+
+```python
+from typing import Optional
+
 
 class AuditLogger:
     """
-    Immutable audit log for compliance and debugging
+    Append-only audit log using aiosqlite (non-blocking in async context).
+    No UPDATE/DELETE operations — insert only.
     """
-    
-    def __init__(self):
-        self.db_path = Path.home() / '.cowork' / 'audit.db'
-        self.db = sqlite3.connect(self.db_path)
-        self._init_db()
-    
-    def _init_db(self):
-        """Create audit log table"""
-        self.db.execute('''
-            CREATE TABLE IF NOT EXISTS audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp REAL NOT NULL,
-                session_id TEXT NOT NULL,
-                tool TEXT NOT NULL,
-                command TEXT NOT NULL,
-                result TEXT,
-                files_modified TEXT,
-                exit_code INTEGER
-            )
-        ''')
-        self.db.commit()
-    
-    def log(self, session_id: str, tool: str, command: str, 
-            result: str, files_modified: List[str] = None, 
-            exit_code: int = 0):
-        """
-        Write to audit log
-        
-        This is immutable - no UPDATE or DELETE, only INSERT
-        """
-        self.db.execute('''
-            INSERT INTO audit_log 
-            (timestamp, session_id, tool, command, result, files_modified, exit_code)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            time.time(),
-            session_id,
-            tool,
-            command,
-            result,
-            json.dumps(files_modified or []),
-            exit_code
-        ))
-        self.db.commit()
-    
-    def query(self, session_id: Optional[str] = None, 
-              since: Optional[float] = None,
-              tool: Optional[str] = None) -> List[Dict]:
-        """Query audit log with filters"""
-        query = "SELECT * FROM audit_log WHERE 1=1"
-        params = []
-        
-        if session_id:
-            query += " AND session_id = ?"
-            params.append(session_id)
-        
-        if since:
-            query += " AND timestamp >= ?"
-            params.append(since)
-        
-        if tool:
-            query += " AND tool = ?"
-            params.append(tool)
-        
-        query += " ORDER BY timestamp DESC"
-        
-        cursor = self.db.execute(query, params)
-        
-        return [
-            {
-                'id': row[0],
-                'timestamp': row[1],
-                'session_id': row[2],
-                'tool': row[3],
-                'command': row[4],
-                'result': row[5],
-                'files_modified': json.loads(row[6]),
-                'exit_code': row[7]
-            }
-            for row in cursor.fetchall()
-        ]
 
-class InterruptionHandler:
-    """
-    Handle graceful interruption (Ctrl+C)
-    """
-    
-    def __init__(self):
-        self.cleanup_callbacks: List[Callable] = []
-        signal.signal(signal.SIGINT, self._handle_interrupt)
-        signal.signal(signal.SIGTERM, self._handle_interrupt)
-    
-    def register_cleanup(self, callback: Callable):
-        """Register cleanup function to call on interruption"""
-        self.cleanup_callbacks.append(callback)
-    
-    def _handle_interrupt(self, signum, frame):
-        """Handle Ctrl+C or kill signal"""
-        print("\n   Interruption detected. Saving progress...")
-        
-        # Run cleanup callbacks
-        for callback in self.cleanup_callbacks:
-            try:
-                callback()
-            except Exception as e:
-                print(f"Cleanup error: {e}")
-        
-        # Offer user options
-        action = self._prompt_user_action()
-        
-        if action == 'resume':
-            print(" Progress saved. Run with --resume to continue.")
-            sys.exit(0)
-        elif action == 'keep':
-            print(" Partial results saved.")
-            sys.exit(0)
-        else:
-            print(" Discarding partial work...")
-            sys.exit(1)
-    
-    def _prompt_user_action(self) -> str:
-        """Ask user what to do after interruption"""
-        print("""
-        What would you like to do?
-        1. Save and resume later
-        2. Keep partial results and exit
-        3. Discard all work
-        """)
-        
-        choice = input("Choice [1/2/3]: ")
-        
-        if choice == '1':
-            return 'resume'
-        elif choice == '2':
-            return 'keep'
-        else:
-            return 'discard'
+    def __init__(self, db_path: Path = None):
+        self.db_path = db_path or Path.home() / '.cowork' / 'audit.db'
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = None
 
-class ObservabilityManager:
-    """
-    Unified observability interface
-    Combines event stream, audit log, and metrics
-    """
-    
-    def __init__(self, session_id: str):
-        self.session_id = session_id
-        self.event_stream = EventStream()
-        self.audit_log = AuditLogger()
-        self.progress = ProgressTracker()
-        self.interruption = InterruptionHandler()
-        self.metrics = MetricsCollector()
-    
-    def log_action(self, tool: str, command: str, result: Any):
-        """
-        Log action to all sinks
-        """
-        # Emit real-time event
-        self.event_stream.emit('action_executed', {
-            'tool': tool,
-            'command': command,
-            'result': str(result)
-        })
-        
-        # Write to audit log
-        self.audit_log.log(
-            session_id=self.session_id,
-            tool=tool,
-            command=command,
-            result=str(result)
+    async def _ensure_db(self):
+        if self._db is None:
+            import aiosqlite
+            self._db = await aiosqlite.connect(str(self.db_path))
+            await self._db.execute('PRAGMA journal_mode=WAL')
+            await self._db.execute('''
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL NOT NULL,
+                    session_id TEXT NOT NULL,
+                    tool TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    result TEXT,
+                    exit_code INTEGER,
+                    duration_ms REAL,
+                    cost_usd REAL
+                )
+            ''')
+            await self._db.commit()
+
+    async def log(self, session_id: str, tool: str, command: str,
+                  result: str = '', exit_code: int = 0, duration_ms: float = 0,
+                  cost_usd: float = 0):
+        await self._ensure_db()
+        await self._db.execute(
+            'INSERT INTO audit_log (timestamp, session_id, tool, command, result, exit_code, duration_ms, cost_usd) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (time.time(), session_id, tool, command, result[:5000], exit_code, duration_ms, cost_usd),
         )
-        
-        # Update metrics
-        self.metrics.record_action(tool)
-    
-    def start_operation(self, description: str, total: Optional[int] = None) -> str:
-        """Start tracking an operation"""
-        task_id = f"{self.session_id}_{int(time.time())}"
-        self.progress.start_task(task_id, total, description)
-        
-        self.event_stream.emit('operation_started', {
-            'task_id': task_id,
-            'description': description
-        })
-        
-        return task_id
-    
-    def heartbeat(self, task_id: str, completed: Optional[int] = None, message: Optional[str] = None):
-        """Update operation progress"""
-        self.progress.heartbeat(task_id, completed, message)
-        
-        if message:
-            self.event_stream.emit('progress_update', {
-                'task_id': task_id,
-                'message': message
-            })
+        await self._db.commit()
 
-class MetricsCollector:
-    """
-    Collect performance metrics
-    """
-    
-    def __init__(self):
-        self.action_counts = defaultdict(int)
-        self.action_durations = defaultdict(list)
-        self.error_counts = defaultdict(int)
-    
-    def record_action(self, tool: str, duration: Optional[float] = None):
-        """Record action execution"""
-        self.action_counts[tool] += 1
-        
-        if duration:
-            self.action_durations[tool].append(duration)
-    
-    def record_error(self, tool: str):
-        """Record error occurrence"""
-        self.error_counts[tool] += 1
-    
-    def get_stats(self) -> Dict:
-        """Get statistics summary"""
-        stats = {
-            'total_actions': sum(self.action_counts.values()),
-            'actions_by_tool': dict(self.action_counts),
-            'errors_by_tool': dict(self.error_counts),
-            'avg_duration_by_tool': {}
+    async def query(self, session_id: str = None, limit: int = 100) -> list[dict]:
+        await self._ensure_db()
+        sql = 'SELECT * FROM audit_log'
+        params = []
+        if session_id:
+            sql += ' WHERE session_id = ?'
+            params.append(session_id)
+        sql += ' ORDER BY timestamp DESC LIMIT ?'
+        params.append(limit)
+
+        cursor = await self._db.execute(sql, params)
+        columns = [d[0] for d in cursor.description]
+        rows = await cursor.fetchall()
+        return [dict(zip(columns, row)) for row in rows]
+
+    async def close(self):
+        if self._db:
+            await self._db.close()
+            self._db = None
+```
+
+### Structured Logging
+
+```python
+import logging
+import json as json_mod
+
+
+class JSONFormatter(logging.Formatter):
+    """JSON log formatter for machine-parseable output."""
+
+    def format(self, record):
+        log_data = {
+            'timestamp': self.formatTime(record),
+            'level': record.levelname,
+            'logger': record.name,
+            'message': record.getMessage(),
         }
-        
-        for tool, durations in self.action_durations.items():
-            if durations:
-                stats['avg_duration_by_tool'][tool] = sum(durations) / len(durations)
-        
-        return stats
+        if hasattr(record, 'tool'):
+            log_data['tool'] = record.tool
+        if hasattr(record, 'duration_ms'):
+            log_data['duration_ms'] = record.duration_ms
+        if hasattr(record, 'cost_usd'):
+            log_data['cost_usd'] = record.cost_usd
+        if record.exc_info:
+            log_data['exception'] = self.formatException(record.exc_info)
+        return json_mod.dumps(log_data)
+
+
+def setup_logging(json_output: bool = False, level: str = 'INFO'):
+    handler = logging.StreamHandler()
+    if json_output:
+        handler.setFormatter(JSONFormatter())
+    else:
+        handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s'))
+    logging.root.addHandler(handler)
+    logging.root.setLevel(getattr(logging, level))
 ```
 
 ---
 
-## MVP vs 1.0 Feature Split
+## Layer 6: Session & Recovery
 
-### MVP (Weekend Build)
+**Purpose:** Session lifecycle, checkpointing, and graceful shutdown.
 
-**Goal:** Functional, safe, single-session agent
+```python
+import signal
+import subprocess
+import atexit
+from dataclasses import dataclass
 
-**Included Layers:**
-- Layer 0: Foundation (Docker with basic security)
-- Layer 1: Brain (LiteLLM with single model)
-- Layer 2: Orchestrator (Hybrid, simplified)
-- Layer 4: Tool Registry (Bash + Browser basics)
-- Layer 6: Security (File validation + trash)
-- Layer 8: Observability (Basic stdout logging)
 
-**MVP Features:**
-- Execute tasks in secure container
-- Provider switching (DeepSeek/Claude)
-- File operations with trash safety
-- Basic browser automation
-- Terminal UI
-- Single session only
-- Basic error handling
+@dataclass
+class Session:
+    id: str
+    workspace: Path
+    created_at: float
+    last_activity: float
+    status: str = 'active'
 
-**MVP Limitations:**
-- No multi-session support
-- No checkpoint/resume
-- No vision fallback
-- No web UI
-- No advanced recovery
 
-### 1.0 (Production Build)
+class SessionManager:
+    """
+    Manages session lifecycle with git-based checkpointing.
 
-**Goal:** Robust, enterprise-ready agent
+    Checkpoints are stored in a separate git directory (~/.cowork/checkpoints/<session_id>)
+    to avoid polluting any existing git repo in the user's workspace.
+    """
 
-**All 10 Layers Included**
+    CHECKPOINT_BASE = Path.home() / '.cowork' / 'checkpoints'
 
-**Additional Features:**
-- Multi-session coordinator
-- Full checkpoint/resume system
-- Vision model fallback
-- Web dashboard UI
-- Advanced error recovery
-- A/B testing for models
-- Long-running task support
-- Detailed audit trails
-- Graceful interruption handling
-- Resource monitoring
-- File lock coordination
-- Network firewall
-- Intent-based permissions
+    def __init__(self, workspace: Path):
+        self.workspace = workspace.resolve()
+        self.session: Optional[Session] = None
+        self.CHECKPOINT_BASE.mkdir(parents=True, exist_ok=True)
+        self._shutdown_handlers_registered = False
+
+    def _git(self, *args) -> subprocess.CompletedProcess:
+        """Run git with a separate checkpoint directory."""
+        git_dir = self.CHECKPOINT_BASE / (self.session.id if self.session else 'default')
+        cmd = ['git', f'--git-dir={git_dir}', f'--work-tree={self.workspace}', *args]
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def create_session(self) -> Session:
+        session = Session(
+            id=uuid_mod.uuid4().hex,
+            workspace=self.workspace,
+            created_at=time.time(),
+            last_activity=time.time(),
+        )
+        self.session = session
+        self._init_checkpoint_repo()
+        return session
+
+    def _init_checkpoint_repo(self):
+        git_dir = self.CHECKPOINT_BASE / self.session.id
+        if not git_dir.exists():
+            git_dir.mkdir(parents=True, exist_ok=True)
+            self._git('init')
+            self._git('add', '-A')
+            self._git('commit', '-m', 'session start', '--allow-empty')
+
+    def save_checkpoint(self, message: str = '') -> str:
+        self._git('add', '-A')
+        msg = f'checkpoint: {message}' if message else f'checkpoint: {time.time()}'
+        self._git('commit', '-m', msg, '--allow-empty')
+        result = self._git('rev-parse', 'HEAD')
+        return result.stdout.strip()
+
+    def restore_checkpoint(self, commit_hash: str):
+        self._git('checkout', commit_hash, '--', '.')
+
+    def get_changes_since(self, commit_hash: str) -> str:
+        result = self._git('diff', '--stat', commit_hash, 'HEAD')
+        return result.stdout
+
+    def heartbeat(self):
+        if self.session:
+            self.session.last_activity = time.time()
+
+
+class GracefulShutdown:
+    """
+    Registers cleanup handlers for SIGINT, SIGTERM, and atexit.
+    Ensures browser, MCP connections, and session state are cleaned up
+    even on unexpected termination.
+    """
+
+    def __init__(self, session_manager: SessionManager, tool_runtime: 'ToolRuntime',
+                 audit_logger: AuditLogger):
+        self.session_manager = session_manager
+        self.tool_runtime = tool_runtime
+        self.audit_logger = audit_logger
+        self._shutting_down = False
+
+    def register(self):
+        signal.signal(signal.SIGINT, self._handle_signal)
+        signal.signal(signal.SIGTERM, self._handle_signal)
+        atexit.register(self._sync_cleanup)
+
+    def _handle_signal(self, signum, frame):
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(self._async_cleanup())
+        else:
+            loop.run_until_complete(self._async_cleanup())
+
+    async def _async_cleanup(self):
+        try:
+            self.session_manager.save_checkpoint('interrupted')
+        except Exception:
+            pass
+        try:
+            await self.tool_runtime.close()
+        except Exception:
+            pass
+        try:
+            await self.audit_logger.close()
+        except Exception:
+            pass
+
+    def _sync_cleanup(self):
+        """atexit handler (synchronous context)."""
+        try:
+            self.session_manager.save_checkpoint('shutdown')
+        except Exception:
+            pass
+```
+
+### Trash Cleanup
+
+```python
+def cleanup_trash(trash_dir: Path, max_age_days: int = 30):
+    """Delete trash files older than max_age_days. Run on session start."""
+    cutoff = time.time() - (max_age_days * 86400)
+    for item in trash_dir.iterdir():
+        try:
+            if item.stat().st_mtime < cutoff:
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+        except OSError:
+            pass
+```
+
+---
+
+## Context Engineering Strategy
+
+**Purpose:** Manage the LLM's context window as a finite budget.
+
+Reference: [Anthropic's "Effective Context Engineering for AI Agents" (Sep 2025)](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents).
+
+The core principle: context is working memory. Fill it with the right information at each step, not everything accumulated so far.
+
+### Token Budget
+
+```python
+@dataclass
+class TokenBudget:
+    max_tokens: int = 100_000
+    system_prompt_tokens: int = 1_500
+    tool_definitions_tokens: int = 2_000
+    reserved_for_response: int = 4_000
+    _used: int = 0
+
+    @property
+    def available(self) -> int:
+        return self.max_tokens - self.system_prompt_tokens - self.tool_definitions_tokens - self.reserved_for_response - self._used
+
+    @property
+    def exhausted(self) -> bool:
+        return self.available < 2_000
+
+    def consume(self, tokens: int):
+        self._used += tokens
+
+    def count_tokens(self, text: str, model: str = '') -> int:
+        """
+        Count tokens using litellm's model-aware tokenizer.
+        Falls back to a heuristic for unknown models.
+        """
+        try:
+            return litellm.token_counter(model=model, text=text)
+        except Exception:
+            # Fallback: ~3.5 chars per token (conservative estimate)
+            return len(text) // 3
+```
+
+### Context State
+
+```python
+class ContextState:
+    """
+    Structured state that lives OUTSIDE the chat history.
+
+    This object is the primary mechanism for preserving information
+    across context compaction cycles. When older messages are summarized
+    and discarded, the data in ContextState survives intact.
+    """
+
+    def __init__(self):
+        self.files_created: list[str] = []
+        self.files_modified: list[str] = []
+        self.files_deleted: list[str] = []
+        self.current_url: Optional[str] = None
+        self.current_step: int = 0
+        self.errors: list[str] = []
+        self.key_facts: list[str] = []
+        self.original_goal: str = ''
+
+    def update_from_result(self, tool: str, args: dict, result: dict):
+        self.current_step += 1
+
+        if tool == 'run_bash':
+            cmd = args.get('command', '')
+            if 'mkdir' in cmd or 'touch' in cmd or 'cp' in cmd:
+                self.files_created.append(cmd.split()[-1] if cmd.split() else cmd)
+            if result.get('exit_code', 0) != 0:
+                self.errors.append(f'{cmd[:80]}: {result.get("stderr", "")[:100]}')
+        elif tool == 'browser_goto':
+            self.current_url = args.get('url')
+        elif tool.startswith('mcp_'):
+            if result.get('error'):
+                self.errors.append(f'MCP {tool}: {result["error"][:100]}')
+
+    def compact_summary(self) -> str:
+        """Injected into the system prompt on every LLM call."""
+        parts = [f'Step: {self.current_step}']
+        if self.current_url:
+            parts.append(f'Browser: {self.current_url}')
+        if self.files_created:
+            parts.append(f'Files created: {", ".join(self.files_created[-10:])}')
+        if self.files_modified:
+            parts.append(f'Files modified: {", ".join(self.files_modified[-10:])}')
+        if self.errors:
+            parts.append(f'Recent errors: {"; ".join(self.errors[-3:])}')
+        if self.key_facts:
+            parts.append(f'Key facts: {"; ".join(self.key_facts[-5:])}')
+        return '\n'.join(parts)
+
+    def summary(self) -> dict:
+        return {
+            'files_created': self.files_created,
+            'files_modified': self.files_modified,
+            'files_deleted': self.files_deleted,
+            'current_url': self.current_url,
+            'current_step': self.current_step,
+            'errors': self.errors,
+            'key_facts': self.key_facts,
+        }
+```
+
+### Message Manager
+
+```python
+class MessageManager:
+    """
+    Manages LLM message history with semantic-preserving compaction.
+
+    Compaction strategy (applied when message count exceeds max_messages):
+    1. Tool results are truncated at insertion time (max 4000 chars each)
+    2. Older messages are summarized, preserving:
+       - Which tools were called and with what key arguments
+       - Abbreviated results (first 150 chars)
+       - ContextState data (files, errors, URLs, key facts)
+    3. Recent messages are kept intact (last keep_recent messages)
+    """
+
+    def __init__(self, system_prompt: str, context_state: ContextState,
+                 token_budget: TokenBudget, model: str = ''):
+        self.system_prompt = system_prompt
+        self.context_state = context_state
+        self.budget = token_budget
+        self.model = model
+        self.messages: list[dict] = []
+        self.max_messages = 40
+        self.keep_recent = 12
+        self.compacted_summary: Optional[str] = None
+
+    def add_user_message(self, content: str):
+        self.messages.append({'role': 'user', 'content': content})
+        self._track_tokens(content)
+
+    def add_assistant_message(self, message):
+        msg_dict = message.model_dump() if hasattr(message, 'model_dump') else message
+        self.messages.append(msg_dict)
+
+    def add_tool_result(self, tool_call_id: str, result: dict):
+        content = json.dumps(result, cls=SafeEncoder, ensure_ascii=False)
+        if len(content) > 4_000:
+            content = content[:3_000] + '\n...[truncated]...\n' + content[-500:]
+        self.messages.append({
+            'role': 'tool',
+            'tool_call_id': tool_call_id,
+            'content': content,
+        })
+        self._track_tokens(content)
+        self._maybe_compact()
+
+    def get_messages(self) -> list[dict]:
+        result = [{'role': 'system', 'content': self._build_system_prompt()}]
+        if self.compacted_summary:
+            result.append({
+                'role': 'user',
+                'content': f'[CONTEXT SUMMARY]\n{self.compacted_summary}',
+            })
+        result.extend(self.messages)
+        return result
+
+    def _build_system_prompt(self) -> str:
+        state_block = self.context_state.compact_summary()
+        if state_block:
+            return f'{self.system_prompt}\n\n[WORKSPACE STATE]\n{state_block}'
+        return self.system_prompt
+
+    def _track_tokens(self, text: str):
+        tokens = self.budget.count_tokens(text, self.model)
+        self.budget.consume(tokens)
+
+    def _maybe_compact(self):
+        if len(self.messages) <= self.max_messages:
+            return
+
+        old_messages = self.messages[:-self.keep_recent]
+        self.messages = self.messages[-self.keep_recent:]
+
+        # Build semantic summary that preserves what was done and what happened
+        action_log = []
+        for msg in old_messages:
+            if msg.get('role') == 'assistant':
+                tool_calls = msg.get('tool_calls', [])
+                for tc in tool_calls:
+                    func = tc.get('function', {})
+                    name = func.get('name', '?')
+                    args_preview = func.get('arguments', '')[:120]
+                    action_log.append(f'- {name}({args_preview})')
+            elif msg.get('role') == 'tool':
+                content = msg.get('content', '')[:150]
+                action_log.append(f'  result: {content}')
+
+        state = self.context_state
+        summary_parts = [
+            f'Original goal: {state.original_goal}',
+            '',
+            'Completed actions:',
+            *action_log[-30:],
+            '',
+            f'Files created: {", ".join(state.files_created[-10:])}',
+            f'Files modified: {", ".join(state.files_modified[-10:])}',
+        ]
+        if state.errors:
+            summary_parts.append(f'Errors encountered: {"; ".join(state.errors[-5:])}')
+        if state.key_facts:
+            summary_parts.append(f'Key facts: {"; ".join(state.key_facts[-5:])}')
+
+        self.compacted_summary = '\n'.join(summary_parts)
+
+
+class SafeEncoder(json.JSONEncoder):
+    """Handles Path, datetime, bytes, and set serialization."""
+
+    def default(self, obj):
+        if isinstance(obj, Path):
+            return str(obj)
+        if hasattr(obj, 'isoformat'):
+            return obj.isoformat()
+        if isinstance(obj, bytes):
+            return obj.decode('utf-8', errors='replace')
+        if isinstance(obj, set):
+            return list(obj)
+        return super().default(obj)
+```
+
+---
+
+## Feature Roadmap
+
+Features are organized by priority tier. Each tier builds on the one above it.
+
+### Foundation
+
+The minimum viable product. A working CLI agent that can execute tasks.
+
+| Layer | Scope |
+|---|---|
+| Sandbox | bubblewrap namespace isolation |
+| Agent Core | LiteLLM library + ReAct loop + cost tracking |
+| Tools | Bash (with safety intercepts) + MCP client |
+| Security | Path validation, trash delete, default network deny |
+| Observability | Rich CLI streaming, structured logging, cost display |
+| Session | Single session, graceful shutdown |
+
+**Foundation delivers:**
+- `pip install opencowork` → set API key → run
+- Execute tasks in bubblewrap sandbox
+- Provider switching via LiteLLM (any model)
+- File operations with safety intercepts
+- MCP tool ecosystem access
+- Real-time streaming output
+- Cost tracking per session
+- Graceful shutdown with state preservation
+
+### Growth
+
+Expanded capabilities and richer user experience.
+
+| Addition | Description |
+|---|---|
+| Playwright browser | DOM-first web automation with route-level domain enforcement |
+| Textual TUI | Permission prompts, progress tracking, audit viewer |
+| Git checkpoints | Workspace state snapshots with separate git directory |
+| Session resume | `--resume` flag for interrupted tasks |
+| gVisor sandbox | Production-grade syscall interception |
+| Plan-and-execute | Optimization layer for batch-style tasks |
+| SQLite audit log | Persistent, queryable action history via aiosqlite |
+| Config file | YAML/TOML config for models, sandbox tier, permissions, domains |
+
+### Scale
+
+Enterprise and advanced features.
+
+| Addition | Description |
+|---|---|
+| Web dashboard UI | Real-time progress, session management, log viewer |
+| Multi-session | Concurrent sessions with advisory file locking |
+| Firecracker | Hardware-level microVM isolation for multi-tenant deployments |
+| Vision fallback | Screenshot + VLM for canvas/anti-bot sites |
+| Enterprise | RBAC, SSO, compliance reporting |
+| Skills system | Document generation, data processing templates |
+| Connectors | Google Drive, Slack, Gmail integration via MCP |
 
 ---
 
 ## Technical Decisions & Rationale
 
-### Why Docker Over Native Execution?
+### Why bubblewrap for Foundation?
 
-**Decision:** Run agent in Docker container, not directly on host
+| Factor | bubblewrap | Docker |
+|---|---|---|
+| Install | `apt install bubblewrap` | Docker daemon + service |
+| Startup | <10ms | 200ms-2s |
+| Dependencies | None (Linux kernel) | dockerd, containerd, runc |
+| User experience | Transparent (no container) | Requires image pull, volume mounts |
+| Security | Namespace isolation | Namespace isolation (shared kernel) |
+| Resource limits | ulimit (basic) | cgroups (better) |
 
-**Rationale:**
-1. **Security:** Limits blast radius if agent goes rogue
-2. **Resource Control:** Hard limits on CPU/memory prevent runaway processes
-3. **Isolation:** Multiple sessions can run without conflicts
-4. **Reproducibility:** Same environment every time
-5. **Easy Reset:** Kill container to clean state
+bubblewrap for Foundation (zero friction), Docker+gVisor for Growth/Scale (resource control + stronger isolation).
 
-**Trade-off:** Slight overhead (100-200MB RAM, 5-10% CPU)
+### Why LiteLLM as Library, Not Proxy?
 
----
+Running LiteLLM as a proxy server adds an extra service to manage, network latency on every LLM call, and a single point of failure. Using `litellm` as a Python library gives the same provider abstraction with zero operational overhead.
 
-### Why Hybrid Orchestrator Over Pure ReAct?
+**Known trade-off:** LiteLLM has documented reliability issues at scale (token counting inaccuracies, cold start latency, retry loop edge cases). For Foundation-tier usage (single user, moderate volume), these are acceptable. For Scale tier, consider direct provider SDK calls as a fallback path.
 
-**Decision:** Use flexible task graphs with ReAct fallback
+### Why Async Throughout?
 
-**Rationale:**
-1. **Efficiency:** Graph avoids repeated LLM calls for deterministic steps
-2. **Cost:** One planning call vs. N execution calls
-3. **Latency:** Instant local decision vs. 2s LLM call per step
-4. **Adaptability:** ReAct handles unexpected situations
+LLM API calls take 2-30 seconds. Browser page loads take 1-30 seconds. Synchronous execution means no streaming output, no heartbeats, no cancel/interrupt capability, no parallel tool execution. Full async from day 1: `asyncio` event loop, `playwright.async_api`, `aiosqlite`.
 
-**Example:**
-```
-Pure ReAct: 5 LLM calls × 2s = 10s total
-Hybrid:     1 LLM call × 2s + instant execution = 2s total
-```
+### Why MCP in Foundation?
 
----
+MCP is the standard for agent-tool integration. Without MCP, every tool must be hand-coded and users cannot add their own tools. With MCP in Foundation:
+- Filesystem, git, GitHub tools available immediately via `npx`
+- Users can connect any MCP server
+- Tool definitions generated automatically from MCP schemas
+- ~200 lines of integration code for massive extensibility
 
-### Why Playwright Over Vision as Default?
+**Known trade-off:** MCP tool results can be large and noisy, causing context window saturation and up to 236x token inflation (per 2025 research). Mitigation: truncate all MCP results, prefix tool descriptions with `[MCP:server]` to help the LLM attribute sources.
 
-**Decision:** Use DOM automation (Playwright) first, vision as fallback
+### Why Git for Checkpoints?
 
-**Rationale:**
-1. **Reliability:** Selectors more stable than pixel coordinates
-2. **Speed:** DOM queries instant, vision inference takes ~1s
-3. **Cost:** Playwright free, vision model costs money
-4. **Accuracy:** DOM guarantees correctness, vision can misclick
+Computing file hashes on every checkpoint is O(n) over all files, painfully slow for large workspaces, and MD5 is cryptographically broken. Git provides O(changed files) incremental tracking, built-in diff/restore/history, free deduplication, and is already installed on every dev machine.
 
-**When Vision Wins:**
-- Canvas elements (Google Sheets, Figma)
-- Shadow DOM with obfuscated selectors
-- Anti-automation sites
-- Visual verification needed
+The checkpoint git directory is kept separate from the workspace (`~/.cowork/checkpoints/<session_id>`) so it does not conflict with the user's own git repo.
 
----
+### Why DOM-First Browser Automation?
 
-### Why Trash Over Permanent Delete?
+Screenshot-based browser automation (Claude Cowork's approach) requires a vision model API call for every interaction — slow and expensive. Playwright DOM automation gives direct element access via CSS selectors (instant, deterministic, free). Vision fallback is deferred to Growth tier for cases where DOM fails (canvas elements, anti-bot protections).
 
-**Decision:** Move files to trash instead of `rm`
+### Why ReAct over Plan-and-Execute as the Core Loop?
 
-**Rationale:**
-1. **Safety:** Users can recover from agent mistakes
-2. **No Rollback Needed:** Recovery is simple file move
-3. **User Expectation:** Matches OS behavior (Trash/Recycle Bin)
-4. **Debugging:** Can examine deleted files post-mortem
+Plan-and-execute assumes the full execution path can be determined upfront. In practice, real tasks involve dynamic content (web pages change), unpredictable errors (disk full, permissions), and branching logic (different actions based on file contents). The LLM cannot reliably predict these at planning time.
 
-**Trade-off:** Uses disk space (mitigated by periodic trash cleanup)
-
----
-
-### Why Intent-Based Permissions Over Always-Ask?
-
-**Decision:** Auto-grant safe operations, confirm high-risk only
-
-**Rationale:**
-1. **UX:** Users won't tolerate permission prompts for every `ls`
-2. **Security:** Still blocks dangerous operations (delete, encrypt, upload)
-3. **Context:** Grants based on what user mentioned in prompt
-4. **Balance:** Safety without annoyance
-
-**Example:**
-```
-User: "Organize my downloads"
-→ Auto-grant read/write on ~/Downloads
-→ Confirm before deleting any files
-→ Block network access (not mentioned in prompt)
-```
-
----
-
-### Why Checkpoints Over Rollback?
-
-**Decision:** Save state snapshots for recovery context, not time-travel
-
-**Rationale:**
-1. **Physics:** Can't undo network requests or API calls
-2. **Filesystem:** ZFS snapshots not available everywhere
-3. **Complexity:** True rollback requires complex transaction system
-4. **Practicality:** Context + trash bin solves 90% of recovery needs
-
-**What Checkpoints Provide:**
-- Context for LLM to generate recovery plan
-- File hash diff to show what changed
-- Browser state to restore sessions
-- Audit trail for debugging
-
----
-
-### Why Session-Based Containers Over Persistent VM?
-
-**Decision:** Container lives for session duration, then dies
-
-**Rationale:**
-1. **Cleanliness:** No accumulation of junk files/processes
-2. **Reliability:** Fresh start each session
-3. **Resources:** Temporary containers don't leak memory
-4. **Security:** Attack surface resets each session
-
-**Trade-off:** Can't maintain long-running daemons (solved by resumption in 1.0)
+ReAct handles this naturally: observe result, decide next action, repeat. The plan-and-execute optimization layer is available for tasks where upfront planning is clearly beneficial (batch file operations, known-path workflows), but it is not the default execution pattern.
 
 ---
 
 ## Edge Cases & Solutions
 
-### Edge Case 1: Concurrent File Access
+### EC-1: LLM Returns Malformed JSON
 
-**Problem:**
-```
-Session A: Organizing ~/Downloads
-Session B: Cleaning ~/Downloads
-→ Both modify same files simultaneously → corruption
-```
+**Problem:** Tool call arguments contain invalid JSON.
 
-**Solution:** Layer 0.5 (Session Coordinator)
-- File locks prevent concurrent writes
-- User chooses which session proceeds on conflict
-- Read operations allowed concurrently
+**Solution:** Wrap `json.loads(tool_call.function.arguments)` in try/except. On failure, return an error to the LLM as a tool result so it can self-correct. The ReAct loop naturally handles this — the LLM sees the error and retries.
 
----
-
-### Edge Case 2: Long-Running Downloads
-
-**Problem:**
-```
-User: "Download all my photos from Google Photos"
-→ Takes 2 hours
-→ Session timeout (30 min) kills task halfway
+```python
+try:
+    args = json.loads(tool_call.function.arguments)
+except json.JSONDecodeError:
+    self.message_manager.add_tool_result(
+        tool_call_id=tool_call.id,
+        result={'error': 'Malformed tool call arguments. Please retry with valid JSON.'},
+    )
+    continue
 ```
 
-**Solution:** ProgressTracker with Heartbeats
-- Agent sends heartbeat every N items processed
-- Timeout only triggers if no heartbeat (actually idle)
-- Long operations explicitly tracked with ETA
+### EC-2: Browser Page Never Reaches networkidle
 
----
+**Problem:** SPAs with websockets, analytics, or live updates never reach `networkidle`.
 
-### Edge Case 3: Package Installation Delay
+**Solution:** Use `domcontentloaded` with a 30s timeout. This fires when HTML is parsed, which is sufficient for most interaction tasks.
 
-**Problem:**
-```
-User: "Analyze CSV with pandas"
-Agent: pip install pandas... (30 seconds)
-→ User waiting, session might timeout
-```
+### EC-3: shlex.split Fails on Malformed Commands
 
-**Solution:** Layered Docker Images
-- Pre-built images with common packages
-- Container selection based on prompt analysis
-- Runtime installs cached for future sessions
+**Problem:** LLM generates command with unbalanced quotes. `shlex.split` raises `ValueError`.
 
----
+**Solution:** Catch the exception and return a clean error to the LLM.
 
-### Edge Case 4: Model Unavailability
+### EC-4: Command Injection via shell=True
 
-**Problem:**
-```
-API call to Claude fails (outage, rate limit, no credits)
-→ Task cannot proceed
-```
+**Problem:** `subprocess.run(command, shell=True)` allows arbitrary shell injection via `;`, `&&`, backticks, `$()`.
 
-**Solution:** Model Registry with Fallbacks
-- Circuit breaker pattern (stop calling failed model)
-- Weighted A/B testing (gradual rollout)
-- Local cached models as last resort
+**Solution:** `shell=True` is never used anywhere in the codebase. All commands are parsed to lists via `shlex.split` and executed as `subprocess.run(cmd_list, shell=False)`. The sandbox layer also receives command lists.
 
----
+### EC-5: browser_read Returns Megabytes
 
-### Edge Case 5: User Interruption (Ctrl+C)
+**Problem:** Raw HTML can be 500KB-5MB. Appending this to LLM messages destroys the context budget.
 
-**Problem:**
-```
-User: "Download emails" (Started 500/5000)
-User presses Ctrl+C
-→ What happens to partial work?
-```
+**Solution:**
+1. Use `page.inner_text('body')` instead of `page.content()` (visible text only, ~90% smaller)
+2. Truncate to 8,000 chars
+3. If user needs full content, save to file and return the file path
 
-**Solution:** InterruptionHandler
-- Catch SIGINT signal
-- Save checkpoint of progress
-- Offer options: resume later, keep partial, discard
-- Graceful cleanup before exit
+### EC-6: Context Window Exhaustion on Long Tasks
 
----
+**Problem:** After 10-15 tool calls, message history exceeds the context window.
 
-### Edge Case 6: Exfiltration Attack
+**Solution:** `MessageManager` with:
+1. Tool result truncation (cap at 4,000 chars per result)
+2. Sliding window (keep last 12 messages, summarize older ones)
+3. Semantic-preserving compaction (action log + ContextState data)
+4. Token budget tracking (stop when exhausted)
 
-**Problem:**
-```
-User: "Organize my photos"
-Agent decides: "Upload to my server for ML tagging"
-→ Data exfiltration
-```
+### EC-7: Docker Daemon Not Running
 
-**Solution:** Split Permissions (File vs Network)
-- File access auto-granted for mentioned paths
-- Network access strictly controlled by allowlist
-- Unknown domains trigger security prompt
+**Problem:** gVisor/Docker sandbox fails because Docker daemon is not installed.
 
----
+**Solution:** bubblewrap is the default sandbox (no daemon required). Docker/gVisor is opt-in. Startup detects available sandbox tiers and selects the best one.
 
-### Edge Case 7: Browser Session Loss
+### EC-8: Concurrent File Access (Multi-Session)
 
-**Problem:**
-```
-User logged into banking site
-Task fails at step 5
-Container restarts
-→ Lost login session
-```
+**Problem:** Two sessions modify the same files simultaneously.
 
-**Solution:** Browser State Checkpoints
-- Playwright `storage_state()` saves cookies/localStorage
-- Restore checkpoint before retry
-- User doesn't need to log in again
+**Solution:** Not in Foundation (single session only). For Growth: advisory file locks via `fcntl.flock()` or SQLite-based lock table.
 
----
+### EC-9: LLM API Key Expires Mid-Session
 
-### Edge Case 8: Model Version Drift
+**Problem:** API calls start failing partway through a task.
 
-**Problem:**
-```
-Day 1: Using DeepSeek-V3
-Day 30: DeepSeek-V4 released (better)
-→ How to upgrade without breaking existing sessions?
-```
+**Solution:** Catch `AuthenticationError` specifically (not retried). Save checkpoint. Prompt user to update API key. Resume from checkpoint.
 
-**Solution:** Model Registry with Versioning
-- A/B testing (80% V4, 20% V3)
-- Gradual rollout monitors success rate
-- Sessions can specify model version explicitly
+### EC-10: User Workspace is on NFS/Network Mount
+
+**Problem:** bubblewrap `--bind` may not work with network mounts. File locking semantics differ.
+
+**Solution:** Document as known limitation. Detect mount type at startup and warn. Recommend copying to local disk.
+
+### EC-11: Playwright Chromium Missing Dependencies
+
+**Problem:** Minimal Linux installs lack Chromium dependencies (libgbm, libnss, etc.).
+
+**Solution:** `playwright install --with-deps chromium` in setup. For Docker tiers, dependencies are pre-installed in the container image. For bubblewrap tier, bind-mount host's Chromium.
+
+### EC-12: Trash Directory Fills Disk
+
+**Problem:** Files moved to trash accumulate over time.
+
+**Solution:** Run `cleanup_trash()` on session start: delete files older than 30 days. Track trash size in `--status` command.
+
+### EC-13: Non-Serializable Context State
+
+**Problem:** `json.dumps()` fails on Path objects, datetime, or bytes.
+
+**Solution:** `SafeEncoder` (see Context Engineering section) handles Path, datetime, bytes, and set types.
+
+### EC-14: Clicks Navigate to Disallowed Domains
+
+**Problem:** The LLM clicks a link that redirects to a domain outside the allowlist. The `browser_goto` domain check only covers explicit navigation, not redirects or click-triggered navigations.
+
+**Solution:** Playwright route interception on all `document` type requests. Every page navigation — whether from `goto()`, a redirect, or a click — is checked against the domain allowlist. Disallowed navigations are aborted at the network level.
+
+### EC-15: MCP Tool Results Saturate Context
+
+**Problem:** MCP servers can return enormous results (full database tables, large file contents). Research shows up to 236x token inflation from naive MCP integration.
+
+**Solution:** All MCP tool results are truncated to 5,000 chars. Tool descriptions are prefixed with `[MCP:server]` for attribution. Large results should be written to a file in /workspace and the file path returned instead.
+
+### EC-16: Chromium Memory Leaks in Long Sessions
+
+**Problem:** Chromium's memory usage grows over time. In sessions with many page navigations, the browser process can consume gigabytes.
+
+**Solution:** `BrowserTool.restart()` method kills and re-launches the browser. Trigger this when memory usage is concerning or between unrelated browsing tasks.
+
+### EC-17: LLM Emits Multiple Parallel Tool Calls
+
+**Problem:** The agent loop only processes the first tool call and ignores the rest.
+
+**Solution:** The agent loop iterates over ALL tool calls in the response. Each call is executed, checked against security, and its result appended to the message history.
+
+### EC-18: Cost Runaway from Agent Loops
+
+**Problem:** A confused agent can loop indefinitely, burning through API credits.
+
+**Solution:** `CostTracker` with a configurable `max_cost_per_session_usd` (default $5). The agent loop checks `exceeds_limit()` after every LLM call and stops if the budget is exhausted. Cost is displayed in the TUI.
 
 ---
 
 ## Security Model
 
-### Defense in Depth
+### Defense in Depth (5 Layers)
 
-Open Cowork uses multiple security layers:
+```
+Layer  │ What it protects               │ How
+───────┼────────────────────────────────┼──────────────────────────────
+  1    │ Kernel attack surface          │ gVisor/bubblewrap namespace isolation
+  2    │ Filesystem                     │ Explicit mount allowlist (not full root)
+  3    │ Network                        │ --unshare-net + route interception
+  4    │ Dangerous operations           │ Command blocklist + trash-for-delete
+  5    │ User intent                    │ Permission prompts for high-risk ops
+```
 
-**1. Container Isolation**
-- Agent runs in Docker container
-- Cannot access host filesystem except mounted volumes
-- Cannot access host network except allowlist
-- Cannot escalate to root (userns-remap)
+Security is enforced at the kernel level (sandbox), not just in Python code. The Python SecurityManager is defense-in-depth, not the primary barrier.
 
-**2. User Mapping**
-- Container runs as host UID/GID
-- Files created have correct ownership
-- No permission issues
-- No root access to host files
+### Mount Allowlist Strategy
 
-**3. Path Validation**
-- All file operations checked against allowlist
-- Only /workspace and /tmp accessible
-- System paths blocked (/etc, /usr, /bin)
+The bubblewrap sandbox explicitly mounts only required system paths:
+- `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64` — read-only (executables and libraries)
+- `/etc/resolv.conf`, `/etc/ssl`, `/etc/ca-certificates` — read-only (DNS and TLS)
+- `/workspace` — read-write (user data)
+- `/trash` — read-write (deleted files)
+- `/tmp`, `/home`, `/run` — tmpfs (isolated, ephemeral)
+- `/proc`, `/dev` — minimal sandbox-provided mounts
 
-**4. Network Firewall**
-- Domain allowlist enforced
-- Unknown domains require user approval
-- Prevents data exfiltration
-- Logs all network activity
+The host root filesystem, `/etc/passwd`, `/etc/shadow`, host `/proc`, and other users' home directories are never exposed to the sandbox.
 
-**5. Trash Instead of Delete**
-- rm command intercepted
-- Files moved to trash, not deleted
-- User can recover mistakes
-- Trash auto-cleaned after 30 days
+### Threat Model
 
-**6. Intent-Based Permissions**
-- Safe operations auto-granted
-- High-risk operations require confirmation
-- Context-aware (what user mentioned)
-- Preview shown before destructive actions
-
-**7. Audit Logging**
-- Every action logged immutably
-- SQLite database for queries
-- Cannot be tampered with
-- Used for debugging and compliance
+| Threat | Mitigation |
+|---|---|
+| LLM generates `rm -rf /` | `rm` intercepted → trash. Sandbox restricts writes to /workspace. Even bypassing the intercept (via Python, find -delete, etc.), the sandbox mount namespace prevents access outside /workspace. |
+| LLM exfiltrates data via curl | Sandbox uses `--unshare-net` (no network by default). Browser is the only network path when enabled, controlled by route-level domain enforcement. |
+| LLM reads ~/.ssh/id_rsa | Sandbox mounts only explicit paths. /home is a tmpfs. Host home directory is never bind-mounted. |
+| Container escape (CVE-2019-5736) | gVisor intercepts syscalls in user-space kernel. No shared host kernel surface. |
+| Prompt injection via web page | Browser content truncated. MCP results truncated and tagged as external. No automatic code execution from page content. |
+| Malicious MCP server | MCP servers listed in config file, user-approved. Results treated as untrusted (truncated, prefixed). MCP servers run inside the same sandbox namespace. |
+| Navigation to malicious domain | Playwright route interception checks domain allowlist on every document request, including redirects and click-triggered navigations. |
+| Cost runaway | CostTracker enforces per-session spending limit. Agent loop halts when budget is exhausted. |
 
 ---
 
-## Future Enhancements
+## Known Limitations
 
-### Version 2.0 Roadmap
+1. **Command-level safety intercepts are bypassable.** The `rm` → trash intercept and command blocklist can be circumvented via Python one-liners, `find -delete`, or other interpreters. The kernel-level sandbox is the real security boundary; the intercepts are a safety net for accidental damage, not adversarial resistance.
 
-1. **Web UI**
-   - Real-time progress dashboard
-   - Session management
-   - Log viewer
-   - Model switcher
+2. **LiteLLM has documented reliability issues at scale.** Token counting inaccuracies, cold start latency (~3s for serverless), and retry loop edge cases are documented by production users. For single-user workloads this is acceptable. A direct-SDK fallback path should be available for users who hit LiteLLM bugs.
 
-2. **MCP Integration**
-   - Support Model Context Protocol servers
-   - Connect to Gmail, Slack, Google Drive
-   - Unified tool interface
+3. **Context compaction is lossy.** Summarizing older messages discards details. Tasks exceeding ~30 turns may experience degraded agent performance as compacted history loses nuance. The ContextState object mitigates this by preserving structured facts across compaction cycles, but it cannot capture everything.
 
-3. **Advanced Recovery**
-   - ZFS snapshot integration
-   - Transaction log
-   - Automatic rollback on critical errors
+4. **Token counting for non-OpenAI models uses heuristics.** `litellm.token_counter()` supports most major providers but falls back to character-based estimation for obscure models. This can cause the token budget to underestimate or overestimate actual usage.
 
-4. **Performance Optimization**
-   - Parallel tool execution
-   - Cached LLM responses
-   - Smarter model routing
+5. **Single-session only at Foundation tier.** No concurrent session support, no file locking, no shared state. Running multiple instances against the same workspace will cause conflicts.
 
-5. **Enterprise Features**
-   - Multi-user support
-   - RBAC permissions
-   - SSO integration
-   - Compliance reporting
+6. **No vision/screenshot fallback at Foundation tier.** Browser automation relies entirely on DOM access. Canvas-rendered content, image-based CAPTCHAs, and aggressive anti-bot sites will not be handled.
 
----
+7. **NFS/network mounts may not work with bubblewrap.** `--bind` relies on Linux mount namespaces, which have limited support for some network filesystem types. Local disk is recommended.
+
+8. **TOCTOU in path validation.** `Path.resolve()` followed by a separate file operation has a theoretical race condition if symlinks are modified between the check and the access. The sandbox mount namespace mitigates this in practice by limiting what paths exist inside the namespace.
+
+9. **MCP security depends on server trust.** MCP servers execute with whatever permissions the host process has (inside the sandbox). A malicious MCP server could theoretically perform actions within the sandbox namespace. Mitigation: only connect to reviewed/trusted MCP servers, and run them inside the same sandbox isolation.
+
+10. **Playwright route interception cannot block sub-resource requests to disallowed domains** without breaking most websites (CDNs, fonts, analytics are cross-domain). Only document-level navigations are enforced. A compromised page could theoretically exfiltrate data via image/script requests to third-party domains, but it cannot access workspace data outside the browser context.
