@@ -1,4 +1,4 @@
-# Open Cowork: Architecture & Implementation Specification
+# Open Cowork: Architecture & Planning Specification
 
 ---
 
@@ -15,11 +15,12 @@
 9. [Layer 5: Observability & TUI](#layer-5-observability--tui)
 10. [Layer 6: Session & Recovery](#layer-6-session--recovery)
 11. [Context Engineering Strategy](#context-engineering-strategy)
-12. [Feature Roadmap](#feature-roadmap)
-13. [Technical Decisions & Rationale](#technical-decisions--rationale)
-14. [Edge Cases & Solutions](#edge-cases--solutions)
-15. [Security Model](#security-model)
-16. [Known Limitations](#known-limitations)
+12. [Configuration System](#configuration-system)
+13. [Feature Roadmap](#feature-roadmap)
+14. [Technical Decisions & Rationale](#technical-decisions--rationale)
+15. [Edge Cases & Solutions](#edge-cases--solutions)
+16. [Security Model](#security-model)
+17. [Known Limitations](#known-limitations)
 
 ---
 
@@ -29,7 +30,7 @@
 
 Open Cowork provides an autonomous agent capable of:
 - Managing files and directories on the local filesystem
-- Automating browser interactions via Playwright
+- Automating browser interactions via stealth browser backends (Patchright, Pydoll, Camoufox)
 - Connecting to external services via MCP (Model Context Protocol)
 - Executing multi-step workflows in a sandboxed environment
 
@@ -53,7 +54,7 @@ Open Cowork fills the gap:
 | Platform | macOS (Windows planned) | Linux |
 | LLM | Claude only | Any (75+ providers) |
 | Cost | $100-200/month | Free (BYO API key) |
-| Browser | Chrome extension (screenshot-based) | Playwright (DOM-first, faster) |
+| Browser | Chrome extension (screenshot-based) | Stealth browser backends (Patchright default, Pydoll/Camoufox for protected sites) |
 | Extensibility | Connectors (Anthropic-reviewed) | MCP servers (open ecosystem) |
 | Sandboxing | VM isolation | gVisor / bubblewrap (configurable) |
 | Source | Closed | MIT open source |
@@ -64,14 +65,16 @@ Open Cowork fills the gap:
 
 ### Landscape (March 2026)
 
-| Project | Focus | Sandbox | LLM Support | Stars |
-|---|---|---|---|---|
-| **Claude Cowork** | Desktop automation (macOS) | VM isolation | Claude only | N/A (closed) |
-| **OpenHands** | Coding agent | Docker/E2B/Modal | Multi-provider | ~50K |
-| **OpenCode** | Terminal coding agent | Local (bubblewrap optional) | 75+ providers | ~108K |
-| **Browser-Use** | Web automation | None | Multi-provider | ~60K |
-| **Open Interpreter** | General computer use | Optional Docker | Multi-provider | ~55K |
-| **Open Cowork** | Desktop automation (Linux) | gVisor/bubblewrap | Multi-provider | — |
+| Project | Focus | Sandbox | LLM Support | Browser Stealth | Stars |
+|---|---|---|---|---|---|
+| **Claude Cowork** | Desktop automation (macOS) | VM isolation | Claude only | Screenshot-based | N/A (closed) |
+| **OpenHands** | Coding agent | Docker/E2B/Modal | Multi-provider | None | ~50K |
+| **OpenCode** | Terminal coding agent | Local (bubblewrap optional) | 75+ providers | None | ~108K |
+| **Browser-Use** | Web automation | None | Multi-provider | Custom Chromium fork (C++) | ~78K |
+| **Scrapling** | Adaptive web scraping | None | N/A | Built-in Cloudflare bypass | ~22.5K |
+| **Pydoll** | Browser automation | None | N/A | CDP-direct, no WebDriver | ~6.6K |
+| **Open Interpreter** | General computer use | Optional Docker | Multi-provider | None | ~55K |
+| **Open Cowork** | Desktop automation (Linux) | gVisor/bubblewrap | Multi-provider | Pluggable (Patchright/Pydoll/Camoufox) | — |
 
 **Positioning:** Claude Cowork's feature set (file management, browser automation, document generation, office workflows) for Linux, with any LLM, self-hosted, and open source. This is a knowledge-worker automation agent targeting Linux power users and developers.
 
@@ -98,10 +101,20 @@ Open Cowork fills the gap:
    - Provide pause/resume/cancel controls
    - Display running cost per session
 
-4. **DOM First, Vision as Fallback**
-   - Playwright for 90% of web tasks (faster, cheaper, more reliable)
-   - Vision models only when DOM fails (canvas elements, anti-automation sites)
-   - Direct DOM access avoids screenshot round-trip latency and vision model costs
+4. **Stealth Browser-First, Vision as Fallback**
+
+   The key question for browser automation is not "DOM vs screenshots" — it is how detectable the browser engine is. Modern anti-bot systems (Cloudflare, DataDome, Akamai, Kasada, PerimeterX) detect vanilla Playwright/Selenium in under 50ms via WebDriver flags, CDP leaks, TLS fingerprints, and behavioral analysis.
+
+   Our strategy uses a tiered approach with pluggable browser backends:
+   - **Foundation:** Patchright (patched Playwright) — fixes major detection leaks, drop-in replacement
+   - **Growth:** Pydoll (CDP-direct, no WebDriver) and Camoufox (C++ Firefox patches) for protected sites
+   - **Fallback:** Vision models (screenshot + VLM) only when all browser backends fail
+
+   Realistic expectations:
+   - ~70% of sites work with Patchright (patched Playwright)
+   - ~20% more work with CDP-direct (Pydoll) or C++ patches (Camoufox)
+   - ~5% need vision fallback (canvas elements, image CAPTCHAs)
+   - ~5% will not work reliably (banking, heavy anti-bot) — documented as limitation
 
 5. **Context is a Budget, Not a Dump**
    - Every token sent to the LLM costs money and attention
@@ -124,13 +137,13 @@ Open Cowork fills the gap:
 │         (LLM Provider + ReAct Loop)              │
 ├─────────────────────────────────────────────────┤
 │            Layer 3: Tool Runtime                 │
-│      (Bash + Browser + MCP Servers)              │
+│   (Bash + Stealth Browser + MCP Servers)         │
 ├─────────────────────────────────────────────────┤
 │            Layer 4: Security Manager             │
 │    (Permissions, Path Validation, Network)        │
 ├─────────────────────────────────────────────────┤
 │            Layer 1: Sandbox                      │
-│      (gVisor / bubblewrap / Docker)              │
+│         (bubblewrap / gVisor)                    │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -138,8 +151,8 @@ Open Cowork fills the gap:
 
 - **Layer 1 (Sandbox):** Kernel-level isolation for untrusted code execution
 - **Layer 2 (Agent Core):** LLM provider abstraction + ReAct execution loop + cost tracking
-- **Layer 3 (Tool Runtime):** Bash REPL, Playwright browser, MCP tool servers
-- **Layer 4 (Security):** Permission model, path validation, network policy, MCP result sandboxing
+- **Layer 3 (Tool Runtime):** Bash REPL, stealth browser (pluggable backends), MCP tool servers
+- **Layer 4 (Security):** Permission model, path validation, network policy, secrets exclusion, MCP result sandboxing
 - **Layer 5 (Observability):** TUI interface, progress tracking, audit logging, cost display
 - **Layer 6 (Session):** Lifecycle management, checkpointing, graceful shutdown
 
@@ -155,237 +168,46 @@ Docker containers share the host kernel. LLM-generated code is unpredictable and
 
 ### Sandbox Tiers
 
-```yaml
-Tier 1 — bubblewrap (zero dependencies):
-  Description: Linux namespace isolation without Docker daemon
-  Startup: <10ms
-  Security: Namespace isolation (mount, PID, network, user)
-  Use case: Default for local development / single-user
-  Trade-off: No cgroup resource limits (use ulimit instead)
+**Tier 1 — bubblewrap (Foundation, zero dependencies)**
 
-Tier 2 — gVisor (recommended production):
-  Description: User-space kernel that intercepts syscalls
-  Startup: ~50ms (via runsc OCI runtime)
-  Security: Dramatically reduced kernel attack surface
-  Use case: Production, multi-user, untrusted workloads
-  Trade-off: Some syscall incompatibilities (rare for Python/Node)
+Linux namespace isolation without Docker daemon. Startup in <10ms. Installed via `apt install bubblewrap`.
 
-Tier 3 — Docker with gVisor runtime (enterprise):
-  Description: Full container orchestration with gVisor isolation
-  Startup: ~200ms
-  Security: gVisor + cgroups + namespace isolation
-  Use case: Enterprise with existing Docker infrastructure
-  Trade-off: Requires Docker daemon, heavier setup
+- Provides namespace isolation: mount, PID, network, user
+- Uses explicit **mount allowlist** (never bind-mounts host root):
+  - `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64` — read-only (executables and libraries)
+  - `/etc/resolv.conf`, `/etc/ssl`, `/etc/ca-certificates`, `/etc/ld.so.cache` — read-only (DNS and TLS)
+  - `/workspace` — read-write (user data, bound from host workspace)
+  - `/trash` — read-write (deleted files, bound from `~/.cowork/trash`)
+  - `/tmp`, `/home`, `/run` — tmpfs (isolated, ephemeral)
+  - `/proc`, `/dev` — minimal sandbox-provided mounts
+- Network isolation via `--unshare-net` by default; network allowed only when explicitly configured
+- PID namespace isolation via `--unshare-pid`
+- Process dies with parent via `--die-with-parent`
+- No cgroup resource limits (use `ulimit` as a basic alternative)
+- Trade-off: lighter isolation than gVisor, but zero friction to set up
 
-Tier 4 — Firecracker microVM (maximum security):
-  Description: Hardware-level isolation via KVM
-  Startup: ~125ms
-  Security: Separate kernel per session, VM-level isolation
-  Use case: Multi-tenant SaaS, compliance-critical
-  Trade-off: Requires KVM support, more operational complexity
-```
+**Tier 2 — gVisor (Growth, recommended for production)**
 
-### bubblewrap Implementation
+User-space kernel that intercepts syscalls via `runsc` OCI runtime. Startup ~50ms.
 
-```python
-import subprocess
-import os
-from pathlib import Path
+- Dramatically reduced kernel attack surface — syscalls are handled by gVisor's Sentry, not the host kernel
+- Runs as a Docker runtime (`--runtime=runsc`), providing cgroups + namespace + syscall interception
+- Container configuration: read-only root, 4GB memory limit, 2 CPU limit, 256 PID limit, `no-new-privileges`, 512MB tmpfs for `/tmp`
+- Requires Docker daemon + gVisor `runsc` runtime installed
+- Trade-off: some rare syscall incompatibilities (uncommon for Python/Node workloads)
 
-
-class BubblewrapSandbox:
-    """
-    Lightweight Linux namespace sandbox using bubblewrap (bwrap).
-    No Docker daemon required. Installed via: apt install bubblewrap
-
-    Mount strategy: explicit allowlist of system paths.
-    Only /usr, /bin, /sbin, /lib, /lib64, and minimal /etc are exposed read-only.
-    /proc and /dev are mounted as minimal isolated filesystems.
-    The host root is never bind-mounted wholesale.
-    """
-
-    # System paths to expose read-only inside the sandbox
-    SYSTEM_RO_PATHS = ['/usr', '/bin', '/sbin', '/lib', '/lib64']
-
-    # Minimal /etc entries for DNS resolution and TLS
-    ETC_RO_PATHS = [
-        '/etc/resolv.conf',
-        '/etc/ssl',
-        '/etc/ca-certificates',
-        '/etc/ld.so.cache',
-        '/etc/ld.so.conf',
-        '/etc/ld.so.conf.d',
-        '/etc/alternatives',
-    ]
-
-    def __init__(self, workspace: Path, config: dict = None):
-        self.workspace = workspace.resolve()
-        self.trash_dir = Path.home() / '.cowork' / 'trash'
-        self.trash_dir.mkdir(parents=True, exist_ok=True)
-        self.config = config or {}
-
-    def execute(self, command: list[str], timeout: int = 30) -> dict:
-        bwrap_cmd = self._build_bwrap_command(command)
-
-        try:
-            result = subprocess.run(
-                bwrap_cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                shell=False,
-            )
-            return {
-                'stdout': result.stdout,
-                'stderr': result.stderr,
-                'exit_code': result.returncode,
-            }
-        except subprocess.TimeoutExpired:
-            return {
-                'stdout': '',
-                'stderr': f'Command timed out after {timeout}s',
-                'exit_code': -1,
-            }
-        except FileNotFoundError:
-            return {
-                'stdout': '',
-                'stderr': 'bubblewrap (bwrap) not found. Install: apt install bubblewrap',
-                'exit_code': -1,
-            }
-
-    def _build_bwrap_command(self, command: list[str]) -> list[str]:
-        bwrap = ['bwrap']
-
-        # Read-only system paths (explicit allowlist, never full root)
-        for sys_path in self.SYSTEM_RO_PATHS:
-            if os.path.exists(sys_path):
-                bwrap.extend(['--ro-bind', sys_path, sys_path])
-
-        # Minimal /etc entries (DNS, TLS, dynamic linker)
-        for etc_path in self.ETC_RO_PATHS:
-            if os.path.exists(etc_path):
-                bwrap.extend(['--ro-bind', etc_path, etc_path])
-
-        # Writable workspace and trash
-        bwrap.extend([
-            '--bind', str(self.workspace), '/workspace',
-            '--bind', str(self.trash_dir), '/trash',
-        ])
-
-        # Isolated tmpfs for sensitive paths
-        bwrap.extend([
-            '--tmpfs', '/tmp',
-            '--tmpfs', '/home',
-            '--tmpfs', '/run',
-        ])
-
-        # Minimal /proc and /dev (not the host's real /proc or /dev)
-        bwrap.extend([
-            '--proc', '/proc',
-            '--dev', '/dev',
-        ])
-
-        # Namespace isolation
-        bwrap.extend([
-            '--unshare-pid',
-            '--unshare-uts',
-            '--die-with-parent',
-            '--chdir', '/workspace',
-        ])
-
-        # Network isolation is the default; allow only when explicitly configured
-        if not self.config.get('allow_network', False):
-            bwrap.append('--unshare-net')
-
-        bwrap.extend(['--'] + command)
-        return bwrap
-
-
-class GVisorSandbox:
-    """
-    gVisor-based sandbox using Docker with runsc runtime.
-    Requires: docker + gVisor runsc runtime installed.
-    """
-
-    def __init__(self, workspace: Path, image: str = 'opencowork:base'):
-        self.workspace = workspace.resolve()
-        self.image = image
-
-    async def create_container(self) -> str:
-        import docker
-        client = docker.from_env()
-
-        container = client.containers.run(
-            image=self.image,
-            runtime='runsc',
-            user=f'{os.getuid()}:{os.getgid()}',
-            volumes={
-                str(self.workspace): {'bind': '/workspace', 'mode': 'rw'},
-            },
-            environment={
-                'WORKSPACE': '/workspace',
-            },
-            network_mode='none',
-            detach=True,
-            mem_limit='4g',
-            cpu_count=2,
-            pids_limit=256,
-            security_opt=['no-new-privileges'],
-            read_only=True,
-            tmpfs={'/tmp': 'size=512m'},
-        )
-        return container.id
-
-    async def execute(self, container_id: str, command: list[str], timeout: int = 30) -> dict:
-        import docker
-        client = docker.from_env()
-        container = client.containers.get(container_id)
-
-        try:
-            exit_code, output = container.exec_run(
-                cmd=command,
-                workdir='/workspace',
-                demux=True,
-            )
-            stdout = output[0].decode() if output[0] else ''
-            stderr = output[1].decode() if output[1] else ''
-            return {'stdout': stdout, 'stderr': stderr, 'exit_code': exit_code}
-        except Exception as e:
-            return {'stdout': '', 'stderr': str(e), 'exit_code': -1}
-```
+**Future options (Scale tier):** Docker with gVisor runtime for enterprises with existing Docker infrastructure. Firecracker microVMs for multi-tenant SaaS deployments requiring hardware-level KVM isolation.
 
 ### Container Image (Docker/gVisor Tiers Only)
 
-A single well-equipped base image for tiers that use Docker:
+A single base image (~1.5GB) pre-installs common tools:
 
-```dockerfile
-FROM python:3.12-slim
+- **System:** git, curl, wget, jq, ripgrep, tree, file, unzip
+- **Office:** libreoffice-calc, libreoffice-writer, ghostscript, imagemagick
+- **Browser:** Chromium via Patchright/Playwright install
+- **Python packages:** pandas, numpy, openpyxl, python-docx, beautifulsoup4, requests, httpx, Pillow, pymupdf, litellm, mcp, patchright
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl wget jq ripgrep tree file unzip \
-    libreoffice-calc libreoffice-writer \
-    ghostscript imagemagick \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN pip install playwright && playwright install chromium --with-deps
-
-RUN pip install --no-cache-dir \
-    pandas numpy openpyxl python-docx \
-    beautifulsoup4 requests httpx \
-    Pillow pdf2image pymupdf \
-    litellm mcp
-
-COPY agent/ /opt/agent/
-WORKDIR /workspace
-
-RUN useradd -m -u 1000 agent
-USER agent
-```
-
-**Size:** ~1.5GB (acceptable — OpenHands is ~10GB).
-Pre-install common packages. If a rare package is needed, `pip install` at runtime with user confirmation.
-
-For the bubblewrap tier (no Docker), the agent runs host-installed tools inside namespace isolation. Required host packages: `python3`, `bwrap`, `git`. Optional: `playwright`, MCP server binaries.
+For the bubblewrap tier (no Docker), the agent runs host-installed tools inside namespace isolation. Required host packages: `python3`, `bwrap`, `git`. Optional: `patchright`, MCP server binaries.
 
 ---
 
@@ -395,320 +217,59 @@ For the bubblewrap tier (no Docker), the agent runs host-installed tools inside 
 
 ### LLM Provider
 
-```python
-import litellm
-import asyncio
-import random
-from dataclasses import dataclass, field
+Provider-agnostic LLM interface using LiteLLM as a Python library (not proxy server). Zero operational overhead compared to running a proxy service.
 
+**Configuration defaults:**
+- Primary model: `deepseek/deepseek-chat`
+- Fallback model: `anthropic/claude-sonnet-4`
+- Vision model: `anthropic/claude-sonnet-4`
+- Max retries: 2
+- Timeout: 60s per call
+- Max cost per session: $5.00 (configurable)
 
-@dataclass
-class ModelConfig:
-    primary: str = 'deepseek/deepseek-chat'
-    fallback: str = 'anthropic/claude-sonnet-4'
-    vision: str = 'anthropic/claude-sonnet-4'
-    max_retries: int = 2
-    timeout: int = 60
-    max_cost_per_session_usd: float = 5.0
-
-
-class LLMProviderError(Exception):
-    pass
-
-
-class LLMProvider:
-    """
-    Provider-agnostic LLM interface via litellm (used as library, not proxy server).
-    """
-
-    def __init__(self, config: ModelConfig = None):
-        self.config = config or ModelConfig()
-
-    async def completion(
-        self,
-        messages: list[dict],
-        model: str = None,
-        tools: list[dict] = None,
-        stream: bool = False,
-    ) -> dict:
-        model = model or self.config.primary
-
-        for attempt in range(self.config.max_retries + 1):
-            current_model = model if attempt == 0 else self.config.fallback
-            try:
-                response = await litellm.acompletion(
-                    model=current_model,
-                    messages=messages,
-                    tools=tools,
-                    stream=stream,
-                    timeout=self.config.timeout,
-                )
-                return response
-            except litellm.RateLimitError:
-                # Respect rate limits with exponential backoff + jitter
-                wait = (2 ** attempt) + random.uniform(0, 1)
-                await asyncio.sleep(wait)
-                continue
-            except litellm.AuthenticationError as e:
-                # Do not retry auth failures
-                raise LLMProviderError(f'Authentication failed for {current_model}: {e}') from e
-            except Exception as e:
-                if attempt == self.config.max_retries:
-                    raise LLMProviderError(f'All models failed: {e}') from e
-                # Exponential backoff for transient errors
-                wait = (2 ** attempt) + random.uniform(0, 1)
-                await asyncio.sleep(wait)
-                continue
-```
+**Call flow:**
+1. Attempt primary model
+2. On rate limit: exponential backoff with jitter (`2^attempt + random(0,1)` seconds), then retry
+3. On transient error: backoff, then retry with fallback model
+4. On authentication error: fail immediately (no retry — bad key won't fix itself)
+5. After max retries exhausted: raise error, checkpoint session state
 
 ### Cost Tracker
 
-```python
-@dataclass
-class CostTracker:
-    max_cost_usd: float = 5.0
-    session_cost_usd: float = 0.0
-    calls: list[dict] = field(default_factory=list)
+Tracks cumulative session cost using LiteLLM's built-in cost calculator (`litellm.completion_cost()`).
 
-    def record(self, response):
-        """Record cost from an LLM response using litellm's cost calculator."""
-        try:
-            cost = litellm.completion_cost(completion_response=response)
-        except Exception:
-            cost = 0.0
-        self.session_cost_usd += cost
-        self.calls.append({
-            'model': getattr(response, 'model', 'unknown'),
-            'cost_usd': cost,
-            'tokens': response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0,
-        })
-
-    def exceeds_limit(self) -> bool:
-        return self.session_cost_usd >= self.max_cost_usd
-```
+- Records cost, model, and token count for every LLM call
+- Checks against configurable `max_cost_per_session_usd` limit after every call
+- When budget is exhausted: emit cost_limit event, halt agent loop, notify user via TUI
+- Falls back to zero-cost estimate when LiteLLM's cost calculator fails for unknown models
 
 ### Agent Loop (ReAct Pattern)
 
-The core execution pattern is ReAct (Reason + Act). The LLM receives context, decides what tool to call, observes the result, and repeats until the task is done.
+The core execution pattern is ReAct (Reason + Act). The LLM receives context, decides what tool to call, observes the result, and repeats until the task is done. Simpler and more reliable than plan-and-execute for the majority of tasks — the LLM adapts to each result as it arrives rather than predicting the entire path upfront.
 
-This is simpler and more reliable than plan-and-execute for the majority of tasks. The LLM does not need to predict the entire execution path upfront — it adapts to each result as it arrives.
+**Loop steps:**
+1. Add user prompt to message history
+2. Build messages: system prompt (with workspace state injected) + compacted history + recent messages
+3. Send messages + tool definitions to LLM
+4. Record cost from response
+5. If LLM returns text (no tool calls) → task complete, return result
+6. If LLM returns tool calls → execute **all** of them (LLMs emit parallel calls):
+   a. Parse tool call arguments (JSON). On malformed JSON, return error to LLM so it self-corrects
+   b. Check permission via SecurityManager. If denied, return "Permission denied" as tool result
+   c. Execute tool via ToolRuntime
+   d. Update ContextState with result (files created/modified, errors, current URL)
+   e. Emit action event to TUI (tool name, truncated args, truncated result)
+   f. Add tool result to message history (truncated to 4,000 chars)
+7. Check cost limit — halt if exceeded
+8. Check turn limit (default 25) — halt if exceeded
+9. Compact message history if it exceeds 40 messages (keep last 12 intact, summarize older)
+10. Repeat from step 2
 
-```python
-import json
-
-
-class AgentLoop:
-    """
-    ReAct execution loop.
-
-    Flow per turn:
-      1. Send messages + tool definitions to LLM
-      2. If LLM returns tool calls, execute ALL of them
-      3. Append results to message history
-      4. If context is growing large, compact older messages
-      5. Repeat until LLM produces a text response (task complete) or limits hit
-    """
-
-    def __init__(
-        self,
-        llm: LLMProvider,
-        tools: 'ToolRuntime',
-        security: 'SecurityManager',
-        event_bus: 'EventBus',
-        context: 'ContextState',
-        message_manager: 'MessageManager',
-        cost_tracker: CostTracker,
-    ):
-        self.llm = llm
-        self.tools = tools
-        self.security = security
-        self.event_bus = event_bus
-        self.context = context
-        self.message_manager = message_manager
-        self.cost_tracker = cost_tracker
-
-    async def execute_task(self, user_prompt: str, max_turns: int = 25) -> dict:
-        self.message_manager.add_user_message(user_prompt)
-
-        turn = 0
-        for turn in range(max_turns):
-            messages = self.message_manager.get_messages()
-
-            response = await self.llm.completion(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-            )
-
-            self.cost_tracker.record(response)
-            msg = response.choices[0].message
-            self.message_manager.add_assistant_message(msg)
-
-            if not msg.tool_calls:
-                break
-
-            # Process ALL tool calls in the response (LLMs emit parallel calls)
-            for tool_call in msg.tool_calls:
-                func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    self.message_manager.add_tool_result(
-                        tool_call_id=tool_call.id,
-                        result={'error': 'Malformed tool call arguments'},
-                    )
-                    continue
-
-                if not await self.security.check_permission(func_name, args):
-                    result = {'error': 'Permission denied by user'}
-                else:
-                    result = await self.tools.execute(func_name, **args)
-
-                self.context.update_from_result(func_name, args, result)
-                await self.event_bus.emit_action(func_name, str(args)[:200], str(result)[:200])
-
-                self.message_manager.add_tool_result(
-                    tool_call_id=tool_call.id,
-                    result=result,
-                )
-
-            # Check cost limit
-            if self.cost_tracker.exceeds_limit():
-                await self.event_bus.emit('cost_limit', {
-                    'spent': self.cost_tracker.session_cost_usd,
-                    'limit': self.cost_tracker.max_cost_usd,
-                })
-                break
-
-        return {
-            'status': 'completed',
-            'cost_usd': self.cost_tracker.session_cost_usd,
-            'turns': turn + 1,
-            'context': self.context.summary(),
-        }
-
-
-SYSTEM_PROMPT = """You are Open Cowork, an autonomous Linux agent.
-You help users accomplish tasks by executing commands, browsing the web, and connecting to external services.
-
-Available tools:
-- run_bash: Execute shell commands in a sandboxed workspace (/workspace)
-- browser_goto: Navigate to a URL
-- browser_click: Click an element (CSS selector)
-- browser_type: Type into an input field
-- browser_read: Extract text from a page or element
-- mcp_call: Call a connected MCP tool server
-
-Rules:
-- All file operations are scoped to /workspace
-- Use trash (mv to /trash) instead of rm for deletions
-- Confirm destructive operations with the user
-- Read files prior to modifying them
-- Verify results after multi-step operations
-
-When working:
-1. State what you're about to do
-2. Execute the action
-3. Check the result
-4. Continue or adjust based on output"""
-```
+**System prompt** instructs the agent on available tools, workspace scoping (`/workspace`), safety rules (trash instead of rm, confirm destructive ops, read before modify, verify results), and the observe-act-verify workflow.
 
 ### Plan-and-Execute (Optimization Layer)
 
-For batch-style tasks where the full execution path is predictable (e.g., "rename all .jpeg files to .jpg"), a plan-and-execute layer can reduce LLM calls by generating the plan upfront and executing steps directly.
-
-This is an optimization on top of the ReAct loop, not a replacement. It is appropriate when:
-- The task is decomposable into concrete tool calls at planning time
-- Steps do not depend on dynamic content (web pages, API responses)
-- The user requests a predictable, reviewable plan
-
-```python
-class PlanAndExecute:
-    """
-    Optional optimization layer. Generates a plan via structured output,
-    then executes deterministic steps without calling the LLM.
-    Falls back to ReAct for any step that fails or requires judgment.
-    """
-
-    def __init__(self, llm: LLMProvider, tools: 'ToolRuntime', security: 'SecurityManager'):
-        self.llm = llm
-        self.tools = tools
-        self.security = security
-
-    async def generate_plan(self, prompt: str, workspace_state: str) -> list[dict]:
-        response = await self.llm.completion(
-            messages=[
-                {'role': 'system', 'content': PLANNER_SYSTEM_PROMPT},
-                {'role': 'user', 'content': f'{prompt}\n\nWorkspace contents:\n{workspace_state}'},
-            ],
-            tools=[PLAN_TOOL_DEFINITION],
-        )
-        tool_call = response.choices[0].message.tool_calls[0]
-        plan_data = json.loads(tool_call.function.arguments)
-        return plan_data.get('steps', [])
-
-    async def execute_plan(self, steps: list[dict]) -> list[dict]:
-        results = []
-        for step in steps:
-            if not await self.security.check_permission(step['tool'], step.get('args', {})):
-                results.append({'step': step, 'error': 'Permission denied'})
-                continue
-            try:
-                result = await self.tools.execute(step['tool'], **step.get('args', {}))
-                results.append({'step': step, 'result': result})
-            except Exception as e:
-                results.append({'step': step, 'error': str(e)})
-                # Stop executing remaining steps on failure; caller should fall back to ReAct
-                break
-        return results
-
-
-PLANNER_SYSTEM_PROMPT = """You are generating an execution plan for a Linux automation task.
-
-Create a plan with concrete, executable steps using the create_plan tool.
-Each step specifies a tool and its arguments.
-
-Available tools: run_bash, browser_goto, browser_click, browser_type, browser_read, mcp_call
-
-Safety rules:
-- Use trash instead of rm for deletions
-- All file operations scoped to /workspace
-- Include verification steps where appropriate"""
-
-
-PLAN_TOOL_DEFINITION = {
-    'type': 'function',
-    'function': {
-        'name': 'create_plan',
-        'description': 'Create an execution plan for the user task',
-        'parameters': {
-            'type': 'object',
-            'properties': {
-                'goal': {
-                    'type': 'string',
-                    'description': 'One-sentence summary of the goal',
-                },
-                'steps': {
-                    'type': 'array',
-                    'items': {
-                        'type': 'object',
-                        'properties': {
-                            'tool': {
-                                'type': 'string',
-                                'enum': ['run_bash', 'browser_goto', 'browser_click',
-                                         'browser_type', 'browser_read', 'mcp_call'],
-                            },
-                            'args': {'type': 'object'},
-                            'description': {'type': 'string'},
-                        },
-                        'required': ['tool', 'args', 'description'],
-                    },
-                },
-            },
-            'required': ['goal', 'steps'],
-        },
-    },
-}
-```
+For batch-style tasks where the full execution path is predictable (e.g., "rename all .jpeg files to .jpg"), a plan-and-execute layer can reduce LLM calls by generating the plan upfront and executing steps directly. This is an optimization on top of the ReAct loop, not a replacement. It generates a structured plan via LLM, executes deterministic steps without further LLM calls, and falls back to ReAct for any step that fails or requires judgment.
 
 ---
 
@@ -718,519 +279,181 @@ PLAN_TOOL_DEFINITION = {
 
 ### Tool Registry
 
-```python
-import shlex
-import urllib.parse
-from typing import Any
+Central router that dispatches tool calls to the appropriate handler based on function name prefix:
+- `run_bash` → BashTool
+- `browser_*` → BrowserTool (via pluggable backend)
+- `mcp_*` → MCPManager (routes `mcp_servername_toolname` to correct server)
 
-
-class ToolRuntime:
-    """Central tool registry. Routes tool calls to the appropriate handler."""
-
-    def __init__(self, sandbox: 'BubblewrapSandbox | GVisorSandbox', security: 'SecurityManager'):
-        self.sandbox = sandbox
-        self.security = security
-        self.bash = BashTool(sandbox, security)
-        self.browser = BrowserTool(security)
-        self.mcp_manager = MCPManager()
-
-    def get_definitions(self) -> list[dict]:
-        return [
-            *self.bash.definitions(),
-            *self.browser.definitions(),
-            *self.mcp_manager.get_tool_definitions(),
-        ]
-
-    async def execute(self, func_name: str, **kwargs) -> Any:
-        if func_name == 'run_bash':
-            return await self.bash.execute(kwargs['command'], kwargs.get('working_dir', '/workspace'))
-        elif func_name.startswith('browser_'):
-            action = func_name.replace('browser_', '')
-            return await self.browser.execute(action, **kwargs)
-        elif func_name.startswith('mcp_'):
-            # Route mcp_servername_toolname to the correct server and tool
-            parts = func_name.split('_', 2)
-            if len(parts) == 3:
-                return await self.mcp_manager.call_tool(parts[1], parts[2], kwargs)
-            return await self.mcp_manager.call_tool(
-                kwargs.get('server', ''), kwargs.get('tool', ''), kwargs.get('args', {}),
-            )
-        else:
-            return {'error': f'Unknown tool: {func_name}'}
-
-    async def close(self):
-        await self.browser.close()
-        await self.mcp_manager.close()
-```
+Unknown tool names return an error to the LLM so it can self-correct.
 
 ### Bash Tool
 
-```python
-class BashTool:
-    """
-    Bash execution with safety intercepts.
+Shell command execution with defense-in-depth safety intercepts. Commands are always parsed via `shlex.split()` and executed as subprocess argument lists — `shell=True` is never used anywhere.
 
-    The command blocklist and rm-to-trash intercept are defense-in-depth measures,
-    not a security boundary. The LLM can invoke Python, Perl, or other interpreters
-    to bypass command-level intercepts. The real security boundary is the kernel-level
-    sandbox (Layer 1), which restricts filesystem access regardless of how commands
-    are invoked.
+**Safety intercepts (defense-in-depth, not security boundary):**
+- **Blocked commands:** `dd`, `mkfs`, `fdisk`, `mount`, `umount`, `chown`, `su`, `sudo` — rejected immediately
+- **Trash intercept:** `rm` is intercepted and targets are moved to `/trash` with a unique suffix instead of permanent deletion
+- **Path validation:** Any absolute path in command arguments is checked against allowed roots. Paths outside workspace/tmp/trash are rejected or require user permission
+- **Output truncation:** stdout over 10,000 chars is truncated to first 5,000 + last 2,000 chars to protect context window
 
-    shell=True is never used. Commands are parsed to lists via shlex and
-    executed as subprocess arguments.
-    """
+These intercepts are bypassable (the LLM could invoke Python, Perl, or `find -delete`). The real security boundary is the kernel-level sandbox (Layer 1), which restricts filesystem access regardless of how commands are invoked.
 
-    BLOCKED_COMMANDS = {'dd', 'mkfs', 'fdisk', 'mount', 'umount', 'chown', 'su', 'sudo'}
-    TRASH_INTERCEPTED = {'rm'}
+### Browser Tool
 
-    def __init__(self, sandbox, security: 'SecurityManager'):
-        self.sandbox = sandbox
-        self.security = security
+#### The Anti-Bot Problem (2026)
 
-    def definitions(self) -> list[dict]:
-        return [{
-            'type': 'function',
-            'function': {
-                'name': 'run_bash',
-                'description': 'Execute a bash command in the secure workspace. Use for file operations, data processing, package installation.',
-                'parameters': {
-                    'type': 'object',
-                    'properties': {
-                        'command': {'type': 'string', 'description': 'The bash command to execute'},
-                        'working_dir': {'type': 'string', 'description': 'Working directory (default: /workspace)'},
-                    },
-                    'required': ['command'],
-                },
-            },
-        }]
+Modern anti-bot systems detect vanilla Playwright/Selenium through multiple vectors:
 
-    async def execute(self, command: str, working_dir: str = '/workspace') -> dict:
-        try:
-            cmd_parts = shlex.split(command)
-        except ValueError as e:
-            return {'error': f'Invalid command syntax: {e}', 'exit_code': -1}
+| Detection Method | What It Checks |
+|---|---|
+| **WebDriver flag** | `navigator.webdriver === true` (set by Playwright/Selenium by default) |
+| **CDP leaks** | `Runtime.enable`, `Console.enable` calls leave detectable traces |
+| **Command flags** | `--enable-automation`, `--disable-extensions` reveal automation |
+| **TLS fingerprinting** | Headless browsers have distinct TLS handshake signatures |
+| **Behavioral analysis** | Instant clicks, no mouse movement, no scroll patterns |
+| **Canvas/WebGL fingerprinting** | Headless browsers produce identifiable rendering artifacts |
+| **Prototype chain checks** | JS patching (stealth plugins) leaves detectable inconsistencies |
 
-        if not cmd_parts:
-            return {'error': 'Empty command', 'exit_code': -1}
+`playwright-stealth` (JS-level patching) explicitly states: *"Don't expect this to bypass anything but the simplest of bot detection methods."* Anti-bot vendors (Cloudflare, DataDome, Akamai) can currently detect more than they block — they set conservative thresholds to avoid false positives. As AI agent traffic grows, those thresholds will tighten.
 
-        base_cmd = cmd_parts[0]
+#### Browser Backend Abstraction
 
-        if base_cmd in self.BLOCKED_COMMANDS:
-            return {'error': f'Command blocked for safety: {base_cmd}', 'exit_code': -1}
+The browser layer defines a **BrowserBackend interface** that all backends implement. This allows swapping the underlying engine without changing the agent's tool definitions or the LLM's interaction pattern.
 
-        if base_cmd in self.TRASH_INTERCEPTED:
-            return await self._safe_delete(cmd_parts[1:])
+All backends expose the same tool surface. The agent and LLM are unaware of which backend is active — the choice is a configuration decision.
 
-        for part in cmd_parts[1:]:
-            if part.startswith('/') and not self.security.validate_path(part):
-                return {'error': f'Path outside allowed roots: {part}', 'exit_code': -1}
+#### Stealth Tiers
 
-        result = self.sandbox.execute(cmd_parts, timeout=30)
+**Tier 1 — Patchright (Foundation, default)**
 
-        # Truncate large outputs to protect context window
-        stdout = result.get('stdout', '')
-        if len(stdout) > 10_000:
-            result['stdout'] = stdout[:5_000] + '\n\n... [truncated, showing first 5000 and last 2000 chars] ...\n\n' + stdout[-2_000:]
-            result['truncated'] = True
+Patchright is a patched version of Playwright that fixes the major detection leaks. It is a drop-in replacement — same API, just a different import. Apache-2.0 license. ~1.15K GitHub stars.
 
-        return result
+Key patches:
+- Removes `Runtime.enable` leak (executes JS in isolated ExecutionContexts instead)
+- Removes `Console.enable` leak (disables Console API)
+- Removes automation command flags (`--enable-automation`, `--disable-extensions`, etc.)
+- Adds `--disable-blink-features=AutomationControlled` to prevent `navigator.webdriver` detection
 
-    async def _safe_delete(self, targets: list[str]) -> dict:
-        results = []
-        for target in targets:
-            if target.startswith('-'):
-                continue
-            result = self.security.safe_delete(target)
-            results.append(result)
-        return {'stdout': '\n'.join(results), 'exit_code': 0}
-```
+This handles the majority of lightly-to-moderately protected websites. It is the default because it requires zero architectural change from vanilla Playwright.
 
-### Browser Tool (Playwright, Async)
+**Tier 2 — Pydoll (Growth, for protected sites)**
 
-```python
-class BrowserTool:
-    """
-    Playwright-based browser automation.
+Pydoll is a Python library that connects directly to Chrome DevTools Protocol over WebSocket. No WebDriver binary is involved at all — `navigator.webdriver` is never set in the first place, not patched after the fact. MIT license. ~6.6K GitHub stars.
 
-    Key design choices:
-    - Async Playwright API
-    - 'domcontentloaded' wait strategy (SPAs never reach 'networkidle')
-    - inner_text() instead of content() to reduce token usage ~90%
-    - Route interception to enforce domain allowlist on ALL navigations,
-      including redirects and clicks, not only explicit goto calls
-    """
+Key capabilities:
+- Direct CDP connection — no WebDriver binary, no WebDriver protocol, no detectable driver artifacts
+- Human-like interaction engine: variable keystroke timing (30-120ms), realistic typos (~2% error rate), physics-based scrolling
+- Browser fingerprint control: granular modification of Chrome preferences
+- Fully async-native and type-checked with mypy — aligns with the project's async architecture
+- Cookie and session persistence between runs
 
-    MAX_CONTENT_CHARS = 8_000
+Use when Patchright gets blocked: sites checking for CDP artifacts that Patchright doesn't patch, or sites using behavioral analysis that detects instant/robotic interactions.
 
-    def __init__(self, security: 'SecurityManager'):
-        self.security = security
-        self._pw = None
-        self._browser = None
-        self._page = None
+**Tier 3 — Camoufox (Growth, for heavily protected sites)**
 
-    async def _ensure_browser(self):
-        if self._pw is None:
-            from playwright.async_api import async_playwright
-            self._pw = await async_playwright().start()
-            self._browser = await self._pw.chromium.launch(headless=True)
-            self._page = await self._browser.new_page()
+Camoufox is a custom Firefox fork with fingerprint spoofing compiled at the C++ source level. Not JS injection, not runtime patching — the browser binary itself produces genuine-looking fingerprints. MPL-2.0 license. ~1.5K GitHub stars.
 
-            # Intercept document navigations to enforce domain allowlist globally
-            await self._page.route('**/*', self._route_handler)
+Key capabilities:
+- C++ level patches: Canvas, WebGL, AudioContext, fonts, GPU, screen geometry all spoofed at source
+- Firefox-based — less fingerprinted than Chrome (the vast majority of bots use Chrome/Chromium)
+- Automatic fingerprint rotation
+- Has a Python API and existing MCP server integration
 
-    async def _route_handler(self, route):
-        """Block document navigations to domains outside the allowlist."""
-        if route.request.resource_type == 'document':
-            domain = urllib.parse.urlparse(route.request.url).netloc
-            if domain and not self.security.check_network_permission(domain):
-                await route.abort('blockedbyclient')
-                return
-        await route.continue_()
+Use when Chromium-based backends (Patchright, Pydoll) are detected. Firefox's smaller automation footprint in the wild makes it inherently less suspicious.
 
-    def definitions(self) -> list[dict]:
-        return [
-            {
-                'type': 'function',
-                'function': {
-                    'name': 'browser_goto',
-                    'description': 'Navigate to a URL',
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {
-                            'url': {'type': 'string', 'description': 'URL to navigate to'},
-                        },
-                        'required': ['url'],
-                    },
-                },
-            },
-            {
-                'type': 'function',
-                'function': {
-                    'name': 'browser_click',
-                    'description': 'Click an element using CSS selector',
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {
-                            'selector': {'type': 'string'},
-                            'timeout': {'type': 'integer', 'description': 'Wait timeout in ms (default 10000)'},
-                        },
-                        'required': ['selector'],
-                    },
-                },
-            },
-            {
-                'type': 'function',
-                'function': {
-                    'name': 'browser_type',
-                    'description': 'Type text into an input field',
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {
-                            'selector': {'type': 'string'},
-                            'text': {'type': 'string'},
-                        },
-                        'required': ['selector', 'text'],
-                    },
-                },
-            },
-            {
-                'type': 'function',
-                'function': {
-                    'name': 'browser_read',
-                    'description': 'Extract text content from the page or a specific element',
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {
-                            'selector': {
-                                'type': 'string',
-                                'description': 'CSS selector (reads visible text of full page if omitted)',
-                            },
-                        },
-                    },
-                },
-            },
-        ]
+**Tier 4 — Vision Fallback (Growth)**
 
-    async def execute(self, action: str, **kwargs) -> dict:
-        await self._ensure_browser()
-        try:
-            if action == 'goto':
-                return await self._goto(kwargs['url'])
-            elif action == 'click':
-                return await self._click(kwargs['selector'], kwargs.get('timeout', 10_000))
-            elif action == 'type':
-                return await self._type(kwargs['selector'], kwargs['text'])
-            elif action == 'read':
-                return await self._read(kwargs.get('selector'))
-            else:
-                return {'error': f'Unknown browser action: {action}'}
-        except Exception as e:
-            return {'error': str(e), 'action': action}
+Screenshot + vision-capable LLM for sites where DOM access fails entirely. Expensive and slow — a single interaction requires a vision model API call (~$0.01-0.05 per screenshot analysis). Reserved for canvas-rendered content, image-based CAPTCHAs, and sites that defeat all browser backends.
 
-    async def _goto(self, url: str) -> dict:
-        domain = urllib.parse.urlparse(url).netloc
-        if not self.security.check_network_permission(domain):
-            return {'error': f'Domain not in allowlist: {domain}'}
+#### Browser Tool Surface
 
-        await self._page.goto(url, wait_until='domcontentloaded', timeout=30_000)
-        return {'status': 'success', 'url': self._page.url, 'title': await self._page.title()}
+Eight browser actions exposed to the LLM:
 
-    async def _click(self, selector: str, timeout: int) -> dict:
-        await self._page.click(selector, timeout=timeout)
-        return {'status': 'success', 'selector': selector}
+| Tool | Description | Key Behavior |
+|---|---|---|
+| `browser_goto` | Navigate to a URL | Check domain against allowlist. Wait strategy: `domcontentloaded` with 30s timeout (SPAs never reach `networkidle`). |
+| `browser_click` | Click an element (CSS selector) | Configurable wait timeout (default 10s). With Pydoll backend, uses human-like mouse movement. |
+| `browser_type` | Type into an input field | Uses `fill()` for Patchright. With Pydoll backend, uses variable keystroke timing. |
+| `browser_read` | Extract visible text from page/element | Uses `inner_text()` not `content()` (~90% smaller than raw HTML). Truncated to 8,000 chars. |
+| `browser_wait` | Wait for a selector or condition | Wait for element to appear, disappear, or become visible. Configurable timeout. |
+| `browser_screenshot` | Capture page screenshot | Returns image for debugging or vision fallback. Can target full page or specific element. |
+| `browser_scroll` | Scroll the page | Scroll by amount or to element. Essential for lazy-loaded content and infinite scroll pages. |
+| `browser_js` | Execute arbitrary JavaScript | Escape hatch for complex interactions: dropdowns, file uploads, iframes, popups, authentication flows. Returns serialized result. |
 
-    async def _type(self, selector: str, text: str) -> dict:
-        await self._page.fill(selector, text)
-        return {'status': 'success'}
+#### Browser Design Decisions
 
-    async def _read(self, selector: str = None) -> dict:
-        if selector:
-            text = await self._page.inner_text(selector)
-        else:
-            text = await self._page.inner_text('body')
-
-        if len(text) > self.MAX_CONTENT_CHARS:
-            text = text[:self.MAX_CONTENT_CHARS] + f'\n\n... [truncated at {self.MAX_CONTENT_CHARS} chars]'
-
-        return {'text': text, 'length': len(text)}
-
-    async def close(self):
-        if self._browser:
-            await self._browser.close()
-        if self._pw:
-            await self._pw.stop()
-        self._pw = None
-        self._browser = None
-        self._page = None
-
-    async def restart(self):
-        """Kill and restart the browser to clear memory leaks and stale state."""
-        await self.close()
-        await self._ensure_browser()
-```
+- **Route interception for domain enforcement:** Playwright/Patchright route handler intercepts all `document`-type requests (not just `goto` calls) and checks against the domain allowlist. This catches redirects and click-triggered navigations.
+- **Browser profile persistence:** Save and restore cookies, localStorage, and browser state between sessions. Fresh profiles are a detection signal.
+- **Memory management:** `restart()` method kills and re-launches the browser to clear Chromium memory leaks. Trigger between unrelated browsing tasks or when memory usage is concerning.
+- **Domain policy for browsing is separate from sandbox network policy:** The sandbox network (`--unshare-net`) controls bash tool network access. The browser has its own domain allowlist that can be more permissive (user may want to browse the web while keeping bash network-restricted). See [Configuration System](#configuration-system).
 
 ### MCP Integration
 
-```python
-from dataclasses import dataclass
+MCP (Model Context Protocol) is the standard for connecting AI agents to external tools. Integration provides access to the entire ecosystem of pre-built MCP servers.
 
+**How it works:**
+1. MCP servers are configured in `~/.cowork/config.yaml` with their command and optional environment variables
+2. On session start, the agent connects to configured servers via stdio transport
+3. Each server's tools are discovered automatically via `list_tools()`
+4. Tool definitions are injected into the LLM's tool list, namespaced as `mcp_{servername}_{toolname}` with descriptions prefixed by `[MCP:servername]`
+5. When the LLM calls an MCP tool, the request is routed to the correct server
 
-class MCPManager:
-    """
-    Model Context Protocol integration.
+**Result handling (critical for context management):**
+MCP servers can return enormous results (full database tables, large file contents). Research shows up to 236x token inflation from naive MCP integration. All MCP tool results are truncated to 5,000 chars. Large results should be written to a file in `/workspace` and the file path returned instead.
 
-    MCP is the standard for connecting AI agents to external tools.
-    Supports the entire ecosystem of pre-built MCP servers:
-    filesystem, git, GitHub, Slack, Google Drive, databases, etc.
-
-    Tool results from MCP servers are treated as untrusted external data
-    and are truncated/sanitized prior to inclusion in LLM context.
-
-    Reference: https://modelcontextprotocol.io/
-    """
-
-    def __init__(self):
-        self.servers: dict[str, 'MCPServerConnection'] = {}
-
-    async def connect_server(self, name: str, command: list[str], env: dict = None):
-        """
-        Connect to an MCP server (stdio transport).
-
-        Example:
-            await mcp.connect_server('filesystem',
-                ['npx', '@modelcontextprotocol/server-filesystem', '/workspace'])
-            await mcp.connect_server('github',
-                ['npx', '@modelcontextprotocol/server-github'],
-                {'GITHUB_TOKEN': '...'})
-        """
-        from mcp import ClientSession, StdioServerParameters
-        from mcp.client.stdio import stdio_client
-
-        server_params = StdioServerParameters(
-            command=command[0],
-            args=command[1:],
-            env=env,
-        )
-        transport = await stdio_client(server_params).__aenter__()
-        session = ClientSession(*transport)
-        await session.initialize()
-
-        self.servers[name] = MCPServerConnection(
-            name=name,
-            session=session,
-            tools=await session.list_tools(),
-        )
-
-    def get_tool_definitions(self) -> list[dict]:
-        definitions = []
-        for server in self.servers.values():
-            for tool in server.tools:
-                definitions.append({
-                    'type': 'function',
-                    'function': {
-                        'name': f'mcp_{server.name}_{tool.name}',
-                        'description': f'[MCP:{server.name}] {tool.description}',
-                        'parameters': tool.inputSchema,
-                    },
-                })
-        return definitions
-
-    async def call_tool(self, server_name: str, tool_name: str, args: dict) -> dict:
-        if server_name not in self.servers:
-            return {'error': f'MCP server not connected: {server_name}'}
-
-        server = self.servers[server_name]
-        try:
-            result = await server.session.call_tool(tool_name, args)
-            content = str(result.content)
-            # Truncate large MCP results to prevent context saturation
-            if len(content) > 5_000:
-                content = content[:4_000] + '\n...[truncated]...\n' + content[-500:]
-            return {'result': content, 'source': 'mcp', 'server': server_name}
-        except Exception as e:
-            return {'error': str(e)}
-
-    async def close(self):
-        for server in self.servers.values():
-            try:
-                await server.session.__aexit__(None, None, None)
-            except Exception:
-                pass
-        self.servers.clear()
-
-
-@dataclass
-class MCPServerConnection:
-    name: str
-    session: Any
-    tools: list
-```
+**Recommended MCP tools:**
+- `@modelcontextprotocol/server-filesystem` — filesystem operations
+- `@modelcontextprotocol/server-github` — GitHub integration
+- **Scrapling** (22.5K stars, BSD-3) — adaptive web scraping with built-in Cloudflare bypass and an intelligent parser that auto-relocates elements when page structure changes. Recommended as an MCP tool for scraping-specific tasks rather than building scraping into core.
 
 ---
 
 ## Layer 4: Security Manager
 
-**Purpose:** Permission management and safety enforcement at the application level.
-This is defense-in-depth ON TOP of kernel-level sandbox isolation (Layer 1).
+**Purpose:** Permission management and safety enforcement at the application level. This is defense-in-depth ON TOP of kernel-level sandbox isolation (Layer 1).
 
-```python
-import shutil
-import uuid
-from pathlib import Path
+### Permission Model
 
+Intent-based permission system with three tiers:
 
-class SecurityManager:
-    """
-    Application-level security (Layer 4).
-    Works in conjunction with kernel-level sandbox (Layer 1).
+| Operation Type | Examples | Permission |
+|---|---|---|
+| **Read / navigate** | `browser_read`, `browser_goto`, `run_bash` with `ls`/`cat` | Auto-granted |
+| **Write within workspace** | `run_bash` with `mkdir`/`cp`/`mv` in `/workspace` | Auto-granted |
+| **Risky / external** | Paths outside workspace, network access, unknown MCP tools | Prompt user via TUI |
+| **Blocked** | `dd`, `mkfs`, `fdisk`, `mount`, `su`, `sudo` | Always denied |
 
-    Defense layers:
-    1. Sandbox (kernel) — namespace/gVisor/Firecracker isolation
-    2. This class — path validation, permission model, trash delete
-    3. Network — sandbox --unshare-net + route interception in browser
-    """
+### Path Validation
 
-    def __init__(self, workspace: Path, event_bus: 'EventBus' = None):
-        self.workspace = workspace.resolve()
-        self.trash_path = Path.home() / '.cowork' / 'trash'
-        self.trash_path.mkdir(parents=True, exist_ok=True)
+All file paths are resolved (following symlinks) and checked against allowed roots:
+- `workspace` — the user's working directory
+- `/tmp` — temporary files
+- `~/.cowork/trash` — deleted files
+- Session grants — additional paths the user explicitly allows during a session
 
-        self.allowed_roots = [
-            self.workspace,
-            Path('/tmp'),
-            self.trash_path,
-        ]
+Paths outside allowed roots trigger a permission prompt. The sandbox mount namespace provides the hard enforcement — path validation is an additional safety layer.
 
-        # Network allowlist (enforced at both application and kernel level)
-        self.allowed_domains: set[str] = {
-            'pypi.org', 'files.pythonhosted.org',
-            'github.com', 'raw.githubusercontent.com',
-            'registry.npmjs.org',
-        }
+### Network Policy
 
-        self.session_grants: set[Path] = set()
-        self.event_bus = event_bus
+Two separate network policies:
 
-    def validate_path(self, path_str: str) -> bool:
-        """Check if path is within allowed roots. Resolves symlinks."""
-        try:
-            path = Path(path_str).resolve()
-            if any(path.is_relative_to(root) for root in self.allowed_roots):
-                return True
-            return any(path.is_relative_to(grant) for grant in self.session_grants)
-        except (ValueError, RuntimeError, OSError):
-            return False
+1. **Sandbox network (bash tool):** Default deny via `--unshare-net`. No network access from bash commands unless explicitly configured. When enabled, restricted to a domain allowlist (default: pypi.org, github.com, npmjs.org, and their CDN subdomains).
 
-    async def check_permission(self, tool: str, args: dict) -> bool:
-        """
-        Intent-based permission check.
-        Read operations: auto-granted.
-        Write operations within workspace: auto-granted.
-        Risky operations: prompt user via EventBus.
-        """
-        if tool in ('browser_read', 'browser_goto'):
-            return True
+2. **Browser network:** Separate domain allowlist, can be more permissive. Enforced via route interception on all document-level navigations. Users configure allowed browser domains in config (can be set to allow all for open browsing tasks). Sub-resource requests (CDN, fonts, analytics) are not blocked to avoid breaking page rendering.
 
-        if tool == 'run_bash':
-            command = args.get('command', '')
-            try:
-                cmd_parts = shlex.split(command) if command else []
-            except ValueError:
-                return False
-            if cmd_parts and cmd_parts[0] in BashTool.BLOCKED_COMMANDS:
-                return False
-            for part in cmd_parts:
-                if part.startswith('/') and not self.validate_path(part):
-                    return await self._ask_permission(
-                        f'Command accesses path outside workspace: {part}',
-                        risk='high',
-                    )
-            return True
+### Trash-for-Delete
 
-        if tool in ('browser_click', 'browser_type'):
-            return True
+All `rm` commands are intercepted at the bash tool level and converted to moves into `~/.cowork/trash/` with a unique suffix. Trash is cleaned up on session start: files older than 30 days are permanently deleted. Trash size is reported via the `--status` command.
 
-        return await self._ask_permission(
-            f'Allow {tool} with args {json.dumps(args, default=str)[:200]}?',
-            risk='medium',
-        )
+### Secrets Exclusion
 
-    def check_network_permission(self, domain: str) -> bool:
-        if domain in self.allowed_domains:
-            return True
-        for allowed in self.allowed_domains:
-            if domain.endswith(f'.{allowed}'):
-                return True
-        return False
+A `.coworkignore` file (gitignore syntax) in the workspace root specifies files the agent should not read or include in context. Default patterns:
+- `.env`, `.env.*`
+- `*.pem`, `*.key`, `*_rsa`, `*_ed25519`
+- `credentials.json`, `service-account.json`
+- `*.secret`, `*.secrets`
 
-    def safe_delete(self, path_str: str) -> str:
-        """Move to trash instead of permanent delete."""
-        if not self.validate_path(path_str):
-            return f'Error: Path outside workspace: {path_str}'
-
-        src = Path(path_str)
-        if not src.exists():
-            return f'Error: Not found: {path_str}'
-
-        dst = self.trash_path / f'{src.name}.{uuid.uuid4().hex[:8]}'
-        try:
-            shutil.move(str(src), str(dst))
-            return f'Moved to trash: {dst.name}'
-        except Exception as e:
-            return f'Error: {e}'
-
-    async def _ask_permission(self, message: str, risk: str = 'medium') -> bool:
-        """Ask user via EventBus. Returns False on timeout or if no EventBus configured."""
-        if self.event_bus:
-            return await self.event_bus.request_permission(message, risk)
-        return False
-
-    def grant_session_access(self, path: Path):
-        self.session_grants.add(path.resolve())
-
-    def add_allowed_domain(self, domain: str):
-        self.allowed_domains.add(domain)
-```
+The SecurityManager checks this file before allowing read operations. This is a safety measure, not a security boundary — the sandbox is the hard boundary.
 
 ---
 
@@ -1267,175 +490,23 @@ class SecurityManager:
 
 ### EventBus
 
-```python
-import asyncio
-import time
-import uuid as uuid_mod
+Async event bus connecting the agent loop to the TUI. Provides:
 
-
-class EventBus:
-    """Async event bus for TUI updates and permission requests."""
-
-    def __init__(self):
-        self._subscribers: list[asyncio.Queue] = []
-        self._pending_permissions: dict[str, asyncio.Future] = {}
-
-    def subscribe(self) -> asyncio.Queue:
-        queue = asyncio.Queue(maxsize=1000)
-        self._subscribers.append(queue)
-        return queue
-
-    async def emit(self, event_type: str, data: dict):
-        event = {'type': event_type, 'data': data, 'timestamp': time.time()}
-        for queue in self._subscribers:
-            try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
-                pass
-
-    async def emit_action(self, tool: str, command: str, result: str = ''):
-        await self.emit('action', {'tool': tool, 'command': command, 'result': result})
-
-    async def emit_progress(self, step: int, total: int, message: str):
-        await self.emit('progress', {'step': step, 'total': total, 'message': message})
-
-    async def request_permission(self, message: str, risk: str) -> bool:
-        """
-        Emit permission request and wait for TUI to resolve it.
-        The TUI calls resolve_permission() when the user clicks Allow/Deny.
-        Defaults to deny on 60s timeout.
-        """
-        request_id = uuid_mod.uuid4().hex
-        loop = asyncio.get_running_loop()
-        future = loop.create_future()
-        self._pending_permissions[request_id] = future
-
-        await self.emit('permission_request', {
-            'message': message,
-            'risk': risk,
-            'request_id': request_id,
-        })
-
-        try:
-            return await asyncio.wait_for(future, timeout=60.0)
-        except asyncio.TimeoutError:
-            return False
-        finally:
-            self._pending_permissions.pop(request_id, None)
-
-    def resolve_permission(self, request_id: str, granted: bool):
-        """Called by TUI when user clicks Allow/Deny."""
-        future = self._pending_permissions.get(request_id)
-        if future and not future.done():
-            future.set_result(granted)
-```
+- **Pub/sub model:** Multiple subscribers (TUI, audit logger) receive events via async queues
+- **Event types:** `action` (tool executed), `progress` (step N/M), `permission_request`, `cost_limit`, `error`
+- **Permission flow:** Agent emits a permission request event with a request ID. TUI displays prompt. When user clicks Allow/Deny, TUI calls `resolve_permission(request_id, granted)` which resolves the waiting async Future. Default: deny on 60-second timeout.
 
 ### Audit Logger
 
-```python
-from typing import Optional
+Append-only SQLite audit log via `aiosqlite` (non-blocking in async context):
 
+- Records every tool call: timestamp, session_id, tool, command, result (truncated to 5,000 chars), exit_code, duration_ms, cost_usd
+- No UPDATE/DELETE operations — insert only
+- WAL journal mode for concurrent read performance
+- Stored at `~/.cowork/audit.db`
+- Queryable via `--history` command (filter by session, tool, date range)
 
-class AuditLogger:
-    """
-    Append-only audit log using aiosqlite (non-blocking in async context).
-    No UPDATE/DELETE operations — insert only.
-    """
-
-    def __init__(self, db_path: Path = None):
-        self.db_path = db_path or Path.home() / '.cowork' / 'audit.db'
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = None
-
-    async def _ensure_db(self):
-        if self._db is None:
-            import aiosqlite
-            self._db = await aiosqlite.connect(str(self.db_path))
-            await self._db.execute('PRAGMA journal_mode=WAL')
-            await self._db.execute('''
-                CREATE TABLE IF NOT EXISTS audit_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp REAL NOT NULL,
-                    session_id TEXT NOT NULL,
-                    tool TEXT NOT NULL,
-                    command TEXT NOT NULL,
-                    result TEXT,
-                    exit_code INTEGER,
-                    duration_ms REAL,
-                    cost_usd REAL
-                )
-            ''')
-            await self._db.commit()
-
-    async def log(self, session_id: str, tool: str, command: str,
-                  result: str = '', exit_code: int = 0, duration_ms: float = 0,
-                  cost_usd: float = 0):
-        await self._ensure_db()
-        await self._db.execute(
-            'INSERT INTO audit_log (timestamp, session_id, tool, command, result, exit_code, duration_ms, cost_usd) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            (time.time(), session_id, tool, command, result[:5000], exit_code, duration_ms, cost_usd),
-        )
-        await self._db.commit()
-
-    async def query(self, session_id: str = None, limit: int = 100) -> list[dict]:
-        await self._ensure_db()
-        sql = 'SELECT * FROM audit_log'
-        params = []
-        if session_id:
-            sql += ' WHERE session_id = ?'
-            params.append(session_id)
-        sql += ' ORDER BY timestamp DESC LIMIT ?'
-        params.append(limit)
-
-        cursor = await self._db.execute(sql, params)
-        columns = [d[0] for d in cursor.description]
-        rows = await cursor.fetchall()
-        return [dict(zip(columns, row)) for row in rows]
-
-    async def close(self):
-        if self._db:
-            await self._db.close()
-            self._db = None
-```
-
-### Structured Logging
-
-```python
-import logging
-import json as json_mod
-
-
-class JSONFormatter(logging.Formatter):
-    """JSON log formatter for machine-parseable output."""
-
-    def format(self, record):
-        log_data = {
-            'timestamp': self.formatTime(record),
-            'level': record.levelname,
-            'logger': record.name,
-            'message': record.getMessage(),
-        }
-        if hasattr(record, 'tool'):
-            log_data['tool'] = record.tool
-        if hasattr(record, 'duration_ms'):
-            log_data['duration_ms'] = record.duration_ms
-        if hasattr(record, 'cost_usd'):
-            log_data['cost_usd'] = record.cost_usd
-        if record.exc_info:
-            log_data['exception'] = self.formatException(record.exc_info)
-        return json_mod.dumps(log_data)
-
-
-def setup_logging(json_output: bool = False, level: str = 'INFO'):
-    handler = logging.StreamHandler()
-    if json_output:
-        handler.setFormatter(JSONFormatter())
-    else:
-        handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s'))
-    logging.root.addHandler(handler)
-    logging.root.setLevel(getattr(logging, level))
-```
+Application logs use structured JSON format via Python's standard `logging` module for machine-parseable output. Includes tool name, duration, and cost fields on relevant log entries.
 
 ---
 
@@ -1443,150 +514,44 @@ def setup_logging(json_output: bool = False, level: str = 'INFO'):
 
 **Purpose:** Session lifecycle, checkpointing, and graceful shutdown.
 
-```python
-import signal
-import subprocess
-import atexit
-from dataclasses import dataclass
+### Session Lifecycle
 
+Each session has: a unique ID, workspace path, creation time, last activity time, and status (active/paused/completed/interrupted).
 
-@dataclass
-class Session:
-    id: str
-    workspace: Path
-    created_at: float
-    last_activity: float
-    status: str = 'active'
+### Git-Based Checkpointing
 
+Workspace state snapshots use a separate git directory (`~/.cowork/checkpoints/<session_id>`) to avoid polluting any existing git repo in the user's workspace.
 
-class SessionManager:
-    """
-    Manages session lifecycle with git-based checkpointing.
+**Checkpoint behavior:**
+1. Initialize: `git init` in checkpoint dir + initial commit of workspace state on session start
+2. Save: `git add -A` + `git commit` with descriptive message. O(changed files), not O(all files). Free deduplication via git's content-addressable storage.
+3. Restore: `git checkout <commit_hash> -- .` to roll back workspace to a previous state
+4. Diff: `git diff --stat <commit> HEAD` to show what changed since a checkpoint
 
-    Checkpoints are stored in a separate git directory (~/.cowork/checkpoints/<session_id>)
-    to avoid polluting any existing git repo in the user's workspace.
-    """
+**When checkpoints are saved:**
+- Session start (baseline)
+- Before risky operations (user-confirmed destructive actions)
+- On session pause or interrupt
+- On graceful shutdown
 
-    CHECKPOINT_BASE = Path.home() / '.cowork' / 'checkpoints'
+### Graceful Shutdown
 
-    def __init__(self, workspace: Path):
-        self.workspace = workspace.resolve()
-        self.session: Optional[Session] = None
-        self.CHECKPOINT_BASE.mkdir(parents=True, exist_ok=True)
-        self._shutdown_handlers_registered = False
+Registers cleanup handlers for SIGINT, SIGTERM, and `atexit`. Cleanup order:
+1. Save checkpoint with "interrupted" / "shutdown" message
+2. Close browser (kill Chromium process)
+3. Close all MCP server connections
+4. Close audit database connection
 
-    def _git(self, *args) -> subprocess.CompletedProcess:
-        """Run git with a separate checkpoint directory."""
-        git_dir = self.CHECKPOINT_BASE / (self.session.id if self.session else 'default')
-        cmd = ['git', f'--git-dir={git_dir}', f'--work-tree={self.workspace}', *args]
-        return subprocess.run(cmd, capture_output=True, text=True)
+If the event loop is running, cleanup runs as an async task. If not (atexit), a synchronous checkpoint save is performed as a best-effort fallback.
 
-    def create_session(self) -> Session:
-        session = Session(
-            id=uuid_mod.uuid4().hex,
-            workspace=self.workspace,
-            created_at=time.time(),
-            last_activity=time.time(),
-        )
-        self.session = session
-        self._init_checkpoint_repo()
-        return session
+### Session Resume
 
-    def _init_checkpoint_repo(self):
-        git_dir = self.CHECKPOINT_BASE / self.session.id
-        if not git_dir.exists():
-            git_dir.mkdir(parents=True, exist_ok=True)
-            self._git('init')
-            self._git('add', '-A')
-            self._git('commit', '-m', 'session start', '--allow-empty')
-
-    def save_checkpoint(self, message: str = '') -> str:
-        self._git('add', '-A')
-        msg = f'checkpoint: {message}' if message else f'checkpoint: {time.time()}'
-        self._git('commit', '-m', msg, '--allow-empty')
-        result = self._git('rev-parse', 'HEAD')
-        return result.stdout.strip()
-
-    def restore_checkpoint(self, commit_hash: str):
-        self._git('checkout', commit_hash, '--', '.')
-
-    def get_changes_since(self, commit_hash: str) -> str:
-        result = self._git('diff', '--stat', commit_hash, 'HEAD')
-        return result.stdout
-
-    def heartbeat(self):
-        if self.session:
-            self.session.last_activity = time.time()
-
-
-class GracefulShutdown:
-    """
-    Registers cleanup handlers for SIGINT, SIGTERM, and atexit.
-    Ensures browser, MCP connections, and session state are cleaned up
-    even on unexpected termination.
-    """
-
-    def __init__(self, session_manager: SessionManager, tool_runtime: 'ToolRuntime',
-                 audit_logger: AuditLogger):
-        self.session_manager = session_manager
-        self.tool_runtime = tool_runtime
-        self.audit_logger = audit_logger
-        self._shutting_down = False
-
-    def register(self):
-        signal.signal(signal.SIGINT, self._handle_signal)
-        signal.signal(signal.SIGTERM, self._handle_signal)
-        atexit.register(self._sync_cleanup)
-
-    def _handle_signal(self, signum, frame):
-        if self._shutting_down:
-            return
-        self._shutting_down = True
-
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(self._async_cleanup())
-        else:
-            loop.run_until_complete(self._async_cleanup())
-
-    async def _async_cleanup(self):
-        try:
-            self.session_manager.save_checkpoint('interrupted')
-        except Exception:
-            pass
-        try:
-            await self.tool_runtime.close()
-        except Exception:
-            pass
-        try:
-            await self.audit_logger.close()
-        except Exception:
-            pass
-
-    def _sync_cleanup(self):
-        """atexit handler (synchronous context)."""
-        try:
-            self.session_manager.save_checkpoint('shutdown')
-        except Exception:
-            pass
-```
-
-### Trash Cleanup
-
-```python
-def cleanup_trash(trash_dir: Path, max_age_days: int = 30):
-    """Delete trash files older than max_age_days. Run on session start."""
-    cutoff = time.time() - (max_age_days * 86400)
-    for item in trash_dir.iterdir():
-        try:
-            if item.stat().st_mtime < cutoff:
-                if item.is_dir():
-                    shutil.rmtree(item)
-                else:
-                    item.unlink()
-        except OSError:
-            pass
-```
+The `--resume` flag restores the most recent session:
+1. Load session metadata
+2. Restore workspace from last checkpoint
+3. Reload message history (last 12 messages + compacted summary)
+4. Reconnect MCP servers
+5. Display summary of where the session left off
 
 ---
 
@@ -1600,222 +565,106 @@ The core principle: context is working memory. Fill it with the right informatio
 
 ### Token Budget
 
-```python
-@dataclass
-class TokenBudget:
-    max_tokens: int = 100_000
-    system_prompt_tokens: int = 1_500
-    tool_definitions_tokens: int = 2_000
-    reserved_for_response: int = 4_000
-    _used: int = 0
+The context window is partitioned into reserved zones:
 
-    @property
-    def available(self) -> int:
-        return self.max_tokens - self.system_prompt_tokens - self.tool_definitions_tokens - self.reserved_for_response - self._used
+| Zone | Budget | Purpose |
+|---|---|---|
+| System prompt | ~1,500 tokens | Agent instructions + workspace state |
+| Tool definitions | ~2,000 tokens | All tool schemas (bash + browser + MCP) |
+| Reserved for response | ~4,000 tokens | LLM's output space |
+| Available for history | Remaining (~92,500 of 100K) | Messages, tool results, compacted summaries |
 
-    @property
-    def exhausted(self) -> bool:
-        return self.available < 2_000
+Token counting uses LiteLLM's model-aware tokenizer (`litellm.token_counter()`). Falls back to a conservative heuristic (~3.5 chars per token) for models LiteLLM doesn't support.
 
-    def consume(self, tokens: int):
-        self._used += tokens
+### Context State (Lives Outside Chat History)
 
-    def count_tokens(self, text: str, model: str = '') -> int:
-        """
-        Count tokens using litellm's model-aware tokenizer.
-        Falls back to a heuristic for unknown models.
-        """
-        try:
-            return litellm.token_counter(model=model, text=text)
-        except Exception:
-            # Fallback: ~3.5 chars per token (conservative estimate)
-            return len(text) // 3
+A structured state object tracks key facts across the entire session, surviving message compaction cycles:
+
+- **Files created / modified / deleted** (last 10 of each)
+- **Current browser URL**
+- **Current step count**
+- **Recent errors** (last 3, with truncated details)
+- **Key facts** (last 5 — extracted from tool results, e.g., "API returned 404", "file has 1,523 rows")
+- **Original goal** (preserved verbatim from first user message)
+
+This state is injected into the system prompt as a `[WORKSPACE STATE]` block on every LLM call, ensuring the agent always knows what has been done even after older messages are compacted away.
+
+### Message Compaction
+
+When message count exceeds 40, compaction is triggered:
+
+1. **Split:** Keep the last 12 messages intact. Older messages are candidates for compaction.
+2. **Summarize:** Build a semantic summary from older messages preserving:
+   - Which tools were called and with what key arguments (first 120 chars)
+   - Abbreviated results (first 150 chars)
+   - All ContextState data (files, errors, URLs, key facts)
+3. **Inject:** The compacted summary is prepended to the conversation as a `[CONTEXT SUMMARY]` user message.
+4. **Discard:** Original older messages are dropped.
+
+Tool results are truncated at insertion time (max 4,000 chars each) to limit accumulation before compaction is needed. Custom JSON encoder handles non-serializable types (Path, datetime, bytes, set).
+
+---
+
+## Configuration System
+
+**Purpose:** User-configurable settings for models, sandbox, browser, security, and cost limits.
+
+### Environment Variables (API Keys)
+
+Sensitive values are set via environment variables only — never stored in config files:
+
+| Variable | Description |
+|---|---|
+| `OPENCOWORK_API_KEY` | Default LLM API key (or use provider-specific: `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, etc.) |
+| `GITHUB_TOKEN` | For GitHub MCP server (optional) |
+
+### Config File (`~/.cowork/config.yaml`)
+
+```yaml
+# LLM configuration
+model:
+  primary: deepseek/deepseek-chat
+  fallback: anthropic/claude-sonnet-4
+  vision: anthropic/claude-sonnet-4
+  timeout: 60
+  max_retries: 2
+
+# Cost limits
+cost:
+  max_per_session_usd: 5.00
+
+# Sandbox tier: bubblewrap | gvisor
+sandbox:
+  tier: bubblewrap
+  allow_network: false   # for bash tool
+
+# Browser configuration
+browser:
+  backend: patchright     # patchright | pydoll | camoufox
+  headless: true
+  allowed_domains:        # for browser navigation (separate from sandbox network)
+    - "*"                 # default: allow all (override to restrict)
+  persist_profile: true   # save cookies/localStorage between sessions
+
+# Workspace
+workspace:
+  path: ~/workspace       # default working directory
+  ignore_patterns:        # additional .coworkignore patterns
+    - "node_modules/"
+    - ".git/"
+
+# MCP servers
+mcp:
+  servers:
+    filesystem:
+      command: ["npx", "@modelcontextprotocol/server-filesystem", "/workspace"]
+    github:
+      command: ["npx", "@modelcontextprotocol/server-github"]
+      env:
+        GITHUB_TOKEN: "${GITHUB_TOKEN}"
 ```
 
-### Context State
-
-```python
-class ContextState:
-    """
-    Structured state that lives OUTSIDE the chat history.
-
-    This object is the primary mechanism for preserving information
-    across context compaction cycles. When older messages are summarized
-    and discarded, the data in ContextState survives intact.
-    """
-
-    def __init__(self):
-        self.files_created: list[str] = []
-        self.files_modified: list[str] = []
-        self.files_deleted: list[str] = []
-        self.current_url: Optional[str] = None
-        self.current_step: int = 0
-        self.errors: list[str] = []
-        self.key_facts: list[str] = []
-        self.original_goal: str = ''
-
-    def update_from_result(self, tool: str, args: dict, result: dict):
-        self.current_step += 1
-
-        if tool == 'run_bash':
-            cmd = args.get('command', '')
-            if 'mkdir' in cmd or 'touch' in cmd or 'cp' in cmd:
-                self.files_created.append(cmd.split()[-1] if cmd.split() else cmd)
-            if result.get('exit_code', 0) != 0:
-                self.errors.append(f'{cmd[:80]}: {result.get("stderr", "")[:100]}')
-        elif tool == 'browser_goto':
-            self.current_url = args.get('url')
-        elif tool.startswith('mcp_'):
-            if result.get('error'):
-                self.errors.append(f'MCP {tool}: {result["error"][:100]}')
-
-    def compact_summary(self) -> str:
-        """Injected into the system prompt on every LLM call."""
-        parts = [f'Step: {self.current_step}']
-        if self.current_url:
-            parts.append(f'Browser: {self.current_url}')
-        if self.files_created:
-            parts.append(f'Files created: {", ".join(self.files_created[-10:])}')
-        if self.files_modified:
-            parts.append(f'Files modified: {", ".join(self.files_modified[-10:])}')
-        if self.errors:
-            parts.append(f'Recent errors: {"; ".join(self.errors[-3:])}')
-        if self.key_facts:
-            parts.append(f'Key facts: {"; ".join(self.key_facts[-5:])}')
-        return '\n'.join(parts)
-
-    def summary(self) -> dict:
-        return {
-            'files_created': self.files_created,
-            'files_modified': self.files_modified,
-            'files_deleted': self.files_deleted,
-            'current_url': self.current_url,
-            'current_step': self.current_step,
-            'errors': self.errors,
-            'key_facts': self.key_facts,
-        }
-```
-
-### Message Manager
-
-```python
-class MessageManager:
-    """
-    Manages LLM message history with semantic-preserving compaction.
-
-    Compaction strategy (applied when message count exceeds max_messages):
-    1. Tool results are truncated at insertion time (max 4000 chars each)
-    2. Older messages are summarized, preserving:
-       - Which tools were called and with what key arguments
-       - Abbreviated results (first 150 chars)
-       - ContextState data (files, errors, URLs, key facts)
-    3. Recent messages are kept intact (last keep_recent messages)
-    """
-
-    def __init__(self, system_prompt: str, context_state: ContextState,
-                 token_budget: TokenBudget, model: str = ''):
-        self.system_prompt = system_prompt
-        self.context_state = context_state
-        self.budget = token_budget
-        self.model = model
-        self.messages: list[dict] = []
-        self.max_messages = 40
-        self.keep_recent = 12
-        self.compacted_summary: Optional[str] = None
-
-    def add_user_message(self, content: str):
-        self.messages.append({'role': 'user', 'content': content})
-        self._track_tokens(content)
-
-    def add_assistant_message(self, message):
-        msg_dict = message.model_dump() if hasattr(message, 'model_dump') else message
-        self.messages.append(msg_dict)
-
-    def add_tool_result(self, tool_call_id: str, result: dict):
-        content = json.dumps(result, cls=SafeEncoder, ensure_ascii=False)
-        if len(content) > 4_000:
-            content = content[:3_000] + '\n...[truncated]...\n' + content[-500:]
-        self.messages.append({
-            'role': 'tool',
-            'tool_call_id': tool_call_id,
-            'content': content,
-        })
-        self._track_tokens(content)
-        self._maybe_compact()
-
-    def get_messages(self) -> list[dict]:
-        result = [{'role': 'system', 'content': self._build_system_prompt()}]
-        if self.compacted_summary:
-            result.append({
-                'role': 'user',
-                'content': f'[CONTEXT SUMMARY]\n{self.compacted_summary}',
-            })
-        result.extend(self.messages)
-        return result
-
-    def _build_system_prompt(self) -> str:
-        state_block = self.context_state.compact_summary()
-        if state_block:
-            return f'{self.system_prompt}\n\n[WORKSPACE STATE]\n{state_block}'
-        return self.system_prompt
-
-    def _track_tokens(self, text: str):
-        tokens = self.budget.count_tokens(text, self.model)
-        self.budget.consume(tokens)
-
-    def _maybe_compact(self):
-        if len(self.messages) <= self.max_messages:
-            return
-
-        old_messages = self.messages[:-self.keep_recent]
-        self.messages = self.messages[-self.keep_recent:]
-
-        # Build semantic summary that preserves what was done and what happened
-        action_log = []
-        for msg in old_messages:
-            if msg.get('role') == 'assistant':
-                tool_calls = msg.get('tool_calls', [])
-                for tc in tool_calls:
-                    func = tc.get('function', {})
-                    name = func.get('name', '?')
-                    args_preview = func.get('arguments', '')[:120]
-                    action_log.append(f'- {name}({args_preview})')
-            elif msg.get('role') == 'tool':
-                content = msg.get('content', '')[:150]
-                action_log.append(f'  result: {content}')
-
-        state = self.context_state
-        summary_parts = [
-            f'Original goal: {state.original_goal}',
-            '',
-            'Completed actions:',
-            *action_log[-30:],
-            '',
-            f'Files created: {", ".join(state.files_created[-10:])}',
-            f'Files modified: {", ".join(state.files_modified[-10:])}',
-        ]
-        if state.errors:
-            summary_parts.append(f'Errors encountered: {"; ".join(state.errors[-5:])}')
-        if state.key_facts:
-            summary_parts.append(f'Key facts: {"; ".join(state.key_facts[-5:])}')
-
-        self.compacted_summary = '\n'.join(summary_parts)
-
-
-class SafeEncoder(json.JSONEncoder):
-    """Handles Path, datetime, bytes, and set serialization."""
-
-    def default(self, obj):
-        if isinstance(obj, Path):
-            return str(obj)
-        if hasattr(obj, 'isoformat'):
-            return obj.isoformat()
-        if isinstance(obj, bytes):
-            return obj.decode('utf-8', errors='replace')
-        if isinstance(obj, set):
-            return list(obj)
-        return super().default(obj)
-```
+Configuration is loaded in priority order: CLI flags > environment variables > config file > defaults.
 
 ---
 
@@ -1831,19 +680,21 @@ The minimum viable product. A working CLI agent that can execute tasks.
 |---|---|
 | Sandbox | bubblewrap namespace isolation |
 | Agent Core | LiteLLM library + ReAct loop + cost tracking |
-| Tools | Bash (with safety intercepts) + MCP client |
-| Security | Path validation, trash delete, default network deny |
+| Tools | Bash (with safety intercepts) + Patchright browser (8 actions) + MCP client |
+| Security | Path validation, trash delete, secrets exclusion, default network deny |
 | Observability | Rich CLI streaming, structured logging, cost display |
-| Session | Single session, graceful shutdown |
+| Session | Single session, graceful shutdown, config system (env vars + YAML) |
 
 **Foundation delivers:**
 - `pip install opencowork` → set API key → run
 - Execute tasks in bubblewrap sandbox
 - Provider switching via LiteLLM (any model)
 - File operations with safety intercepts
+- Stealth browser automation via Patchright (handles ~70% of websites)
 - MCP tool ecosystem access
 - Real-time streaming output
 - Cost tracking per session
+- Configuration via `~/.cowork/config.yaml`
 - Graceful shutdown with state preservation
 
 ### Growth
@@ -1852,14 +703,16 @@ Expanded capabilities and richer user experience.
 
 | Addition | Description |
 |---|---|
-| Playwright browser | DOM-first web automation with route-level domain enforcement |
+| Pydoll browser backend | CDP-direct automation with human-like interactions for sites Patchright can't handle |
+| Camoufox browser backend | C++ Firefox patches for heavily protected sites |
+| Vision fallback | Screenshot + VLM for canvas/anti-bot/CAPTCHA sites |
 | Textual TUI | Permission prompts, progress tracking, audit viewer |
 | Git checkpoints | Workspace state snapshots with separate git directory |
 | Session resume | `--resume` flag for interrupted tasks |
 | gVisor sandbox | Production-grade syscall interception |
 | Plan-and-execute | Optimization layer for batch-style tasks |
 | SQLite audit log | Persistent, queryable action history via aiosqlite |
-| Config file | YAML/TOML config for models, sandbox tier, permissions, domains |
+| Browser profile persistence | Save/restore cookies and localStorage between sessions |
 
 ### Scale
 
@@ -1870,7 +723,6 @@ Enterprise and advanced features.
 | Web dashboard UI | Real-time progress, session management, log viewer |
 | Multi-session | Concurrent sessions with advisory file locking |
 | Firecracker | Hardware-level microVM isolation for multi-tenant deployments |
-| Vision fallback | Screenshot + VLM for canvas/anti-bot sites |
 | Enterprise | RBAC, SSO, compliance reporting |
 | Skills system | Document generation, data processing templates |
 | Connectors | Google Drive, Slack, Gmail integration via MCP |
@@ -1900,17 +752,17 @@ Running LiteLLM as a proxy server adds an extra service to manage, network laten
 
 ### Why Async Throughout?
 
-LLM API calls take 2-30 seconds. Browser page loads take 1-30 seconds. Synchronous execution means no streaming output, no heartbeats, no cancel/interrupt capability, no parallel tool execution. Full async from day 1: `asyncio` event loop, `playwright.async_api`, `aiosqlite`.
+LLM API calls take 2-30 seconds. Browser page loads take 1-30 seconds. Synchronous execution means no streaming output, no heartbeats, no cancel/interrupt capability, no parallel tool execution. Full async from day 1: `asyncio` event loop, async browser APIs, `aiosqlite`.
 
 ### Why MCP in Foundation?
 
 MCP is the standard for agent-tool integration. Without MCP, every tool must be hand-coded and users cannot add their own tools. With MCP in Foundation:
 - Filesystem, git, GitHub tools available immediately via `npx`
-- Users can connect any MCP server
+- Users can connect any MCP server (including Scrapling for adaptive web scraping)
 - Tool definitions generated automatically from MCP schemas
 - ~200 lines of integration code for massive extensibility
 
-**Known trade-off:** MCP tool results can be large and noisy, causing context window saturation and up to 236x token inflation (per 2025 research). Mitigation: truncate all MCP results, prefix tool descriptions with `[MCP:server]` to help the LLM attribute sources.
+**Known trade-off:** MCP tool results can be large and noisy, causing context window saturation and up to 236x token inflation (per 2025 research). Mitigation: truncate all MCP results to 5,000 chars, prefix tool descriptions with `[MCP:server]` to help the LLM attribute sources.
 
 ### Why Git for Checkpoints?
 
@@ -1918,9 +770,17 @@ Computing file hashes on every checkpoint is O(n) over all files, painfully slow
 
 The checkpoint git directory is kept separate from the workspace (`~/.cowork/checkpoints/<session_id>`) so it does not conflict with the user's own git repo.
 
-### Why DOM-First Browser Automation?
+### Why Patchright over Vanilla Playwright?
 
-Screenshot-based browser automation (Claude Cowork's approach) requires a vision model API call for every interaction — slow and expensive. Playwright DOM automation gives direct element access via CSS selectors (instant, deterministic, free). Vision fallback is deferred to Growth tier for cases where DOM fails (canvas elements, anti-bot protections).
+Vanilla Playwright is detectable in under 50ms by modern anti-bot systems. The key leaks:
+- `Runtime.enable` CDP call leaves traces detectable by page JavaScript
+- `Console.enable` CDP call is a known automation indicator
+- Default command flags (`--enable-automation`) explicitly signal automation
+- `navigator.webdriver` is set to `true`
+
+Patchright fixes all of these at the library level. It is a drop-in replacement (same API, change one import line), is Apache-2.0 licensed, and requires zero architectural changes. There is no reason to use vanilla Playwright when Patchright exists.
+
+Trade-off: Patchright only patches Chromium. Firefox and WebKit are not supported. For Firefox-based stealth, Camoufox is the Growth-tier option.
 
 ### Why ReAct over Plan-and-Execute as the Core Loop?
 
@@ -1935,128 +795,104 @@ ReAct handles this naturally: observe result, decide next action, repeat. The pl
 ### EC-1: LLM Returns Malformed JSON
 
 **Problem:** Tool call arguments contain invalid JSON.
-
-**Solution:** Wrap `json.loads(tool_call.function.arguments)` in try/except. On failure, return an error to the LLM as a tool result so it can self-correct. The ReAct loop naturally handles this — the LLM sees the error and retries.
-
-```python
-try:
-    args = json.loads(tool_call.function.arguments)
-except json.JSONDecodeError:
-    self.message_manager.add_tool_result(
-        tool_call_id=tool_call.id,
-        result={'error': 'Malformed tool call arguments. Please retry with valid JSON.'},
-    )
-    continue
-```
+**Solution:** Wrap argument parsing in try/except. On failure, return an error message to the LLM as a tool result so it can self-correct. The ReAct loop naturally handles this — the LLM sees the error and retries with valid JSON.
 
 ### EC-2: Browser Page Never Reaches networkidle
 
 **Problem:** SPAs with websockets, analytics, or live updates never reach `networkidle`.
-
 **Solution:** Use `domcontentloaded` with a 30s timeout. This fires when HTML is parsed, which is sufficient for most interaction tasks.
 
 ### EC-3: shlex.split Fails on Malformed Commands
 
 **Problem:** LLM generates command with unbalanced quotes. `shlex.split` raises `ValueError`.
-
-**Solution:** Catch the exception and return a clean error to the LLM.
+**Solution:** Catch the exception and return a clean error to the LLM so it can self-correct.
 
 ### EC-4: Command Injection via shell=True
 
-**Problem:** `subprocess.run(command, shell=True)` allows arbitrary shell injection via `;`, `&&`, backticks, `$()`.
-
-**Solution:** `shell=True` is never used anywhere in the codebase. All commands are parsed to lists via `shlex.split` and executed as `subprocess.run(cmd_list, shell=False)`. The sandbox layer also receives command lists.
+**Problem:** `subprocess.run(command, shell=True)` allows arbitrary shell injection.
+**Solution:** `shell=True` is never used. All commands are parsed to lists via `shlex.split` and executed as `subprocess.run(cmd_list, shell=False)`. The sandbox also receives command lists.
 
 ### EC-5: browser_read Returns Megabytes
 
 **Problem:** Raw HTML can be 500KB-5MB. Appending this to LLM messages destroys the context budget.
-
-**Solution:**
-1. Use `page.inner_text('body')` instead of `page.content()` (visible text only, ~90% smaller)
-2. Truncate to 8,000 chars
-3. If user needs full content, save to file and return the file path
+**Solution:** Use `inner_text('body')` instead of `content()` (visible text only, ~90% smaller). Truncate to 8,000 chars. If user needs full content, save to file and return the file path.
 
 ### EC-6: Context Window Exhaustion on Long Tasks
 
 **Problem:** After 10-15 tool calls, message history exceeds the context window.
-
-**Solution:** `MessageManager` with:
-1. Tool result truncation (cap at 4,000 chars per result)
-2. Sliding window (keep last 12 messages, summarize older ones)
-3. Semantic-preserving compaction (action log + ContextState data)
-4. Token budget tracking (stop when exhausted)
+**Solution:** MessageManager with: tool result truncation (4,000 chars per result), sliding window (keep last 12 messages, summarize older), semantic-preserving compaction (action log + ContextState data), and token budget tracking (halt when exhausted).
 
 ### EC-7: Docker Daemon Not Running
 
 **Problem:** gVisor/Docker sandbox fails because Docker daemon is not installed.
-
 **Solution:** bubblewrap is the default sandbox (no daemon required). Docker/gVisor is opt-in. Startup detects available sandbox tiers and selects the best one.
 
 ### EC-8: Concurrent File Access (Multi-Session)
 
 **Problem:** Two sessions modify the same files simultaneously.
-
 **Solution:** Not in Foundation (single session only). For Growth: advisory file locks via `fcntl.flock()` or SQLite-based lock table.
 
 ### EC-9: LLM API Key Expires Mid-Session
 
 **Problem:** API calls start failing partway through a task.
-
 **Solution:** Catch `AuthenticationError` specifically (not retried). Save checkpoint. Prompt user to update API key. Resume from checkpoint.
 
 ### EC-10: User Workspace is on NFS/Network Mount
 
 **Problem:** bubblewrap `--bind` may not work with network mounts. File locking semantics differ.
-
 **Solution:** Document as known limitation. Detect mount type at startup and warn. Recommend copying to local disk.
 
-### EC-11: Playwright Chromium Missing Dependencies
+### EC-11: Browser Chromium Missing Dependencies
 
 **Problem:** Minimal Linux installs lack Chromium dependencies (libgbm, libnss, etc.).
-
-**Solution:** `playwright install --with-deps chromium` in setup. For Docker tiers, dependencies are pre-installed in the container image. For bubblewrap tier, bind-mount host's Chromium.
+**Solution:** `patchright install chromium` (or `playwright install --with-deps chromium`) in setup. For Docker tiers, dependencies are pre-installed in the container image. For bubblewrap tier, bind-mount host's Chromium.
 
 ### EC-12: Trash Directory Fills Disk
 
 **Problem:** Files moved to trash accumulate over time.
+**Solution:** Run trash cleanup on session start: delete files older than 30 days. Track trash size in `--status` command.
 
-**Solution:** Run `cleanup_trash()` on session start: delete files older than 30 days. Track trash size in `--status` command.
+### EC-13: Clicks Navigate to Disallowed Domains
 
-### EC-13: Non-Serializable Context State
+**Problem:** The LLM clicks a link that redirects to a domain outside the allowlist. The `browser_goto` domain check only covers explicit navigation, not redirects.
+**Solution:** Route interception on all `document`-type requests. Every page navigation — whether from `goto()`, a redirect, or a click — is checked against the domain allowlist. Disallowed navigations are aborted at the network level.
 
-**Problem:** `json.dumps()` fails on Path objects, datetime, or bytes.
-
-**Solution:** `SafeEncoder` (see Context Engineering section) handles Path, datetime, bytes, and set types.
-
-### EC-14: Clicks Navigate to Disallowed Domains
-
-**Problem:** The LLM clicks a link that redirects to a domain outside the allowlist. The `browser_goto` domain check only covers explicit navigation, not redirects or click-triggered navigations.
-
-**Solution:** Playwright route interception on all `document` type requests. Every page navigation — whether from `goto()`, a redirect, or a click — is checked against the domain allowlist. Disallowed navigations are aborted at the network level.
-
-### EC-15: MCP Tool Results Saturate Context
+### EC-14: MCP Tool Results Saturate Context
 
 **Problem:** MCP servers can return enormous results (full database tables, large file contents). Research shows up to 236x token inflation from naive MCP integration.
-
 **Solution:** All MCP tool results are truncated to 5,000 chars. Tool descriptions are prefixed with `[MCP:server]` for attribution. Large results should be written to a file in /workspace and the file path returned instead.
 
-### EC-16: Chromium Memory Leaks in Long Sessions
+### EC-15: Chromium Memory Leaks in Long Sessions
 
 **Problem:** Chromium's memory usage grows over time. In sessions with many page navigations, the browser process can consume gigabytes.
+**Solution:** Browser `restart()` method kills and re-launches the browser. Trigger when memory usage is concerning or between unrelated browsing tasks.
 
-**Solution:** `BrowserTool.restart()` method kills and re-launches the browser. Trigger this when memory usage is concerning or between unrelated browsing tasks.
-
-### EC-17: LLM Emits Multiple Parallel Tool Calls
+### EC-16: LLM Emits Multiple Parallel Tool Calls
 
 **Problem:** The agent loop only processes the first tool call and ignores the rest.
-
 **Solution:** The agent loop iterates over ALL tool calls in the response. Each call is executed, checked against security, and its result appended to the message history.
 
-### EC-18: Cost Runaway from Agent Loops
+### EC-17: Cost Runaway from Agent Loops
 
 **Problem:** A confused agent can loop indefinitely, burning through API credits.
+**Solution:** CostTracker with configurable `max_cost_per_session_usd` (default $5). The agent loop checks cost after every LLM call and stops if the budget is exhausted. Cost is displayed in the TUI.
 
-**Solution:** `CostTracker` with a configurable `max_cost_per_session_usd` (default $5). The agent loop checks `exceeds_limit()` after every LLM call and stops if the budget is exhausted. Cost is displayed in the TUI.
+### EC-18: Anti-Bot Detection Blocks Browser Automation
+
+**Problem:** Target website detects the browser as automated and blocks access (Cloudflare challenge page, CAPTCHA, 403 response).
+**Solution:** Tiered escalation:
+1. Retry with Patchright (may be a transient challenge)
+2. Switch to Pydoll backend (CDP-direct, no WebDriver artifacts)
+3. Switch to Camoufox backend (C++ Firefox patches)
+4. Fall back to vision mode (screenshot + VLM)
+5. If all fail, report to user with specific detection details and suggest manual intervention
+
+The agent should detect block signals (challenge pages, repeated 403s, CAPTCHA elements) and escalate automatically rather than retrying the same failing approach.
+
+### EC-19: Secrets Leaked to LLM Context
+
+**Problem:** The agent reads `.env` files or private keys and sends them to the LLM API.
+**Solution:** SecurityManager checks `.coworkignore` patterns before allowing file reads. Default patterns exclude `.env`, `*.pem`, `*.key`, credential files. The LLM is instructed via system prompt not to read or transmit credential-like files.
 
 ---
 
@@ -2076,36 +912,25 @@ Layer  │ What it protects               │ How
 
 Security is enforced at the kernel level (sandbox), not just in Python code. The Python SecurityManager is defense-in-depth, not the primary barrier.
 
-### Mount Allowlist Strategy
-
-The bubblewrap sandbox explicitly mounts only required system paths:
-- `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64` — read-only (executables and libraries)
-- `/etc/resolv.conf`, `/etc/ssl`, `/etc/ca-certificates` — read-only (DNS and TLS)
-- `/workspace` — read-write (user data)
-- `/trash` — read-write (deleted files)
-- `/tmp`, `/home`, `/run` — tmpfs (isolated, ephemeral)
-- `/proc`, `/dev` — minimal sandbox-provided mounts
-
-The host root filesystem, `/etc/passwd`, `/etc/shadow`, host `/proc`, and other users' home directories are never exposed to the sandbox.
-
 ### Threat Model
 
 | Threat | Mitigation |
 |---|---|
-| LLM generates `rm -rf /` | `rm` intercepted → trash. Sandbox restricts writes to /workspace. Even bypassing the intercept (via Python, find -delete, etc.), the sandbox mount namespace prevents access outside /workspace. |
+| LLM generates `rm -rf /` | `rm` intercepted to trash. Sandbox restricts writes to /workspace. Even bypassing the intercept (via Python, find -delete, etc.), the sandbox mount namespace prevents access outside /workspace. |
 | LLM exfiltrates data via curl | Sandbox uses `--unshare-net` (no network by default). Browser is the only network path when enabled, controlled by route-level domain enforcement. |
 | LLM reads ~/.ssh/id_rsa | Sandbox mounts only explicit paths. /home is a tmpfs. Host home directory is never bind-mounted. |
+| LLM reads .env or credentials | `.coworkignore` patterns exclude credential files from agent reads. System prompt instructs against transmitting secrets. |
 | Container escape (CVE-2019-5736) | gVisor intercepts syscalls in user-space kernel. No shared host kernel surface. |
 | Prompt injection via web page | Browser content truncated. MCP results truncated and tagged as external. No automatic code execution from page content. |
 | Malicious MCP server | MCP servers listed in config file, user-approved. Results treated as untrusted (truncated, prefixed). MCP servers run inside the same sandbox namespace. |
-| Navigation to malicious domain | Playwright route interception checks domain allowlist on every document request, including redirects and click-triggered navigations. |
+| Navigation to malicious domain | Route interception checks domain allowlist on every document request, including redirects and click-triggered navigations. |
 | Cost runaway | CostTracker enforces per-session spending limit. Agent loop halts when budget is exhausted. |
 
 ---
 
 ## Known Limitations
 
-1. **Command-level safety intercepts are bypassable.** The `rm` → trash intercept and command blocklist can be circumvented via Python one-liners, `find -delete`, or other interpreters. The kernel-level sandbox is the real security boundary; the intercepts are a safety net for accidental damage, not adversarial resistance.
+1. **Command-level safety intercepts are bypassable.** The `rm` to trash intercept and command blocklist can be circumvented via Python one-liners, `find -delete`, or other interpreters. The kernel-level sandbox is the real security boundary; the intercepts are a safety net for accidental damage, not adversarial resistance.
 
 2. **LiteLLM has documented reliability issues at scale.** Token counting inaccuracies, cold start latency (~3s for serverless), and retry loop edge cases are documented by production users. For single-user workloads this is acceptable. A direct-SDK fallback path should be available for users who hit LiteLLM bugs.
 
@@ -2115,7 +940,7 @@ The host root filesystem, `/etc/passwd`, `/etc/shadow`, host `/proc`, and other 
 
 5. **Single-session only at Foundation tier.** No concurrent session support, no file locking, no shared state. Running multiple instances against the same workspace will cause conflicts.
 
-6. **No vision/screenshot fallback at Foundation tier.** Browser automation relies entirely on DOM access. Canvas-rendered content, image-based CAPTCHAs, and aggressive anti-bot sites will not be handled.
+6. **Anti-bot detection is an arms race.** Patchright handles ~70% of websites today. Pydoll and Camoufox extend coverage to ~90%. The remaining ~10% (banking, heavy anti-bot, image CAPTCHAs) will not work reliably. As anti-bot systems evolve, current stealth measures may become less effective. The pluggable backend architecture allows adopting new stealth technologies as they emerge.
 
 7. **NFS/network mounts may not work with bubblewrap.** `--bind` relies on Linux mount namespaces, which have limited support for some network filesystem types. Local disk is recommended.
 
@@ -2123,4 +948,6 @@ The host root filesystem, `/etc/passwd`, `/etc/shadow`, host `/proc`, and other 
 
 9. **MCP security depends on server trust.** MCP servers execute with whatever permissions the host process has (inside the sandbox). A malicious MCP server could theoretically perform actions within the sandbox namespace. Mitigation: only connect to reviewed/trusted MCP servers, and run them inside the same sandbox isolation.
 
-10. **Playwright route interception cannot block sub-resource requests to disallowed domains** without breaking most websites (CDNs, fonts, analytics are cross-domain). Only document-level navigations are enforced. A compromised page could theoretically exfiltrate data via image/script requests to third-party domains, but it cannot access workspace data outside the browser context.
+10. **Patchright disables Console API.** One of Patchright's anti-detection patches disables `Console.enable`, meaning `console.log()` output is not captured. If console access is needed for debugging, use the `browser_js` tool with custom logging or temporarily switch to vanilla Playwright for development.
+
+11. **Camoufox is MPL-2.0 licensed.** While compatible with MIT projects (file-level copyleft, not project-level), modifications to Camoufox's own source files must remain MPL-2.0. This only matters if forking Camoufox itself, not when using it as a dependency.
